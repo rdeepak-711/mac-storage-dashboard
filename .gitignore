@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# Real disk scan data — never committed, this is Deepak's actual filesystem contents
+web/data/
+*.env
+*.env.local
+
+.DS_Store
