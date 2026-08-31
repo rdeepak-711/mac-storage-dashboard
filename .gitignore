@@ -4,6 +4,11 @@ out/
 build/
 dist/
 
+# Spec Kit process tooling and docs — kept on disk, not tracked in git
+.claude/
+.specify/
+specs/
+
 # Real disk scan data — never committed, this is Deepak's actual filesystem contents
 web/data/
 *.env
