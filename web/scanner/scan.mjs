@@ -1,37 +1,62 @@
 #!/usr/bin/env node
 import { readdir, lstat, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { categorize } from "./categorize.mjs";
 import { appendIndexEntry, pruneOldScans, SCANS_DIR } from "../lib/run-index.mjs";
 
 /**
- * Recursive filesystem walker — builds one ScanSnapshot (data-model.md).
+ * Recursive filesystem walker.
  *
- * Key decisions, per research.md:
- * - lstat, not stat: a symlink is sized as the tiny symlink object itself
- *   and never recursed into (isDirectory() is false for a symlink).
- * - (dev, ino) tracked across the whole walk to catch hard links: a
- *   duplicate is still shown in the tree (for display) but excluded from
- *   its parent's rolled-up size, so totals aren't double-counted.
- * - allocatedBytes (stat.blocks * 512) vs sizeBytes flags iCloud-optimized
- *   ("dataless") files — real disk usage far below the nominal size.
- * - A directory that can't be read (EACCES) is marked "restricted" with
- *   an unknown size rather than crashing the whole scan.
+ * ARCHITECTURE NOTE (2026-08-31): the first version of this file built one
+ * giant in-memory tree for the whole scan, then JSON.stringify'd it as one
+ * document. Against a real ~250GB home directory that crashed twice: first
+ * "RangeError: Invalid string length" (one JSON string too big for V8),
+ * then — after switching to a streaming writer — "JavaScript heap out of
+ * memory" (the in-memory object tree itself, ~4GB+, too big to hold at
+ * once). Both are symptoms of the same root problem: a full-disk file tree
+ * has far more nodes than should ever be held, serialized, or transmitted
+ * as a single blob (this would also have broken the API response and the
+ * browser's JSON.parse later).
+ *
+ * The fix: walk() never returns or retains a directory's full children.
+ * Each directory's immediate children are written to their OWN small
+ * listing file (data/scans/<timestamp>/<hash-of-path>.json) as soon as
+ * they're computed, and only a lightweight summary (no `children` field)
+ * bubbles up to the parent. Memory use is bounded by one directory level
+ * at a time, not by total file count — a scan of 10 files or 2 million
+ * files uses roughly the same peak memory.
+ *
+ * Per-file decisions are unchanged from the original design (research.md):
+ * lstat (not stat) so symlinks are sized as themselves and never followed;
+ * (dev,ino) tracked to de-dup hard links; allocatedBytes vs sizeBytes
+ * flags iCloud/Drive-placeholder files; unreadable directories are marked
+ * "restricted" instead of failing the whole scan.
  */
 
-const ICLOUD_CHECK_MIN_BYTES = 1_000_000; // below this, block rounding alone can look "optimized"
+const ICLOUD_CHECK_MIN_BYTES = 1_000_000;
 const ICLOUD_ALLOCATED_RATIO = 0.1;
 
 const visitedInodes = new Set();
 
-async function walk(absPath, homeDir) {
+function listingFilename(absPath) {
+  return createHash("sha1").update(absPath).digest("hex").slice(0, 16) + ".json";
+}
+
+/**
+ * Walks absPath. Returns a lightweight StorageEntry summary (never a
+ * `children` array). If scanDir is provided, writes a listing file for
+ * every directory visited: { path, entries: <one level of children> }.
+ * categoryTotals is mutated in place as leaf files are visited — this is
+ * how the overall per-category breakdown is computed without a second
+ * pass over a (no-longer-existing) full tree afterward.
+ */
+async function walk(absPath, homeDir, scanDir, categoryTotals) {
   let stat;
   try {
     stat = await lstat(absPath);
   } catch {
-    // Vanished between readdir and lstat, or genuinely unreadable at the
-    // lstat level (rare) — skip rather than fail the whole scan.
-    return null;
+    return null; // vanished between readdir and lstat, or unreadable — skip
   }
 
   const name = path.basename(absPath) || absPath;
@@ -40,11 +65,8 @@ async function walk(absPath, homeDir) {
 
   if (stat.nlink > 1) {
     const key = `${stat.dev}:${stat.ino}`;
-    if (visitedInodes.has(key)) {
-      flags.push("symlink-target-already-counted");
-    } else {
-      visitedInodes.add(key);
-    }
+    if (visitedInodes.has(key)) flags.push("symlink-target-already-counted");
+    else visitedInodes.add(key);
   }
 
   const allocatedBytes = stat.blocks * 512;
@@ -53,7 +75,7 @@ async function walk(absPath, homeDir) {
     if (stat.size > ICLOUD_CHECK_MIN_BYTES && allocatedBytes < stat.size * ICLOUD_ALLOCATED_RATIO) {
       flags.push("icloud-optimized");
     }
-    return {
+    const entry = {
       path: absPath,
       name,
       kind: "file",
@@ -64,6 +86,10 @@ async function walk(absPath, homeDir) {
       lastUsedAt: null,
       flags,
     };
+    if (!flags.includes("symlink-target-already-counted")) {
+      categoryTotals[category] = (categoryTotals[category] ?? 0) + allocatedBytes;
+    }
+    return entry;
   }
 
   let dirents;
@@ -80,13 +106,12 @@ async function walk(absPath, homeDir) {
       modifiedAt: stat.mtime.toISOString(),
       lastUsedAt: null,
       flags: [...flags, "restricted"],
-      children: [],
     };
   }
 
   const children = [];
   for (const dirent of dirents) {
-    const child = await walk(path.join(absPath, dirent.name), homeDir);
+    const child = await walk(path.join(absPath, dirent.name), homeDir, scanDir, categoryTotals);
     if (child) children.push(child);
   }
 
@@ -95,33 +120,27 @@ async function walk(absPath, homeDir) {
       (sum, c) => sum + (c.flags.includes("symlink-target-already-counted") ? 0 : c[key]),
       0,
     );
+  const sizeBytes = rollUp("sizeBytes");
+  const dirAllocatedBytes = rollUp("allocatedBytes");
 
+  if (scanDir) {
+    const listingPath = path.join(scanDir, listingFilename(absPath));
+    await writeFile(listingPath, JSON.stringify({ path: absPath, entries: children }), "utf8");
+  }
+
+  // children is dropped here (goes out of scope) — only the summary below
+  // is returned, so the parent never retains this level's data.
   return {
     path: absPath,
     name,
     kind: "directory",
-    sizeBytes: rollUp("sizeBytes"),
-    allocatedBytes: rollUp("allocatedBytes"),
+    sizeBytes,
+    allocatedBytes: dirAllocatedBytes,
     category,
     modifiedAt: stat.mtime.toISOString(),
     lastUsedAt: null,
     flags,
-    children,
   };
-}
-
-// Summed by allocatedBytes (real disk usage), not sizeBytes (logical size) —
-// see data-model.md's note on StorageEntry.allocatedBytes: this is what
-// actually matches Finder/Storage settings and SC-002's 5% tolerance.
-function summarizeByCategory(entry, acc = {}) {
-  if (entry.kind === "file") {
-    if (!entry.flags.includes("symlink-target-already-counted")) {
-      acc[entry.category] = (acc[entry.category] ?? 0) + entry.allocatedBytes;
-    }
-  } else {
-    for (const child of entry.children ?? []) summarizeByCategory(child, acc);
-  }
-  return acc;
 }
 
 function gb(bytes) {
@@ -142,24 +161,73 @@ async function main() {
   const resolvedRoot = path.resolve(root);
   const homeDir = process.env.HOME ?? resolvedRoot;
 
-  const start = Date.now();
-  const rootEntry = await walk(resolvedRoot, homeDir);
-  const durationMs = Date.now() - start;
+  const scannedAt = new Date().toISOString();
+  const scanFolderName = scannedAt.replace(/[:.]/g, "-");
+  const scanDir = dryRun ? null : path.join(SCANS_DIR, scanFolderName);
+  if (scanDir) await mkdir(scanDir, { recursive: true });
 
-  if (!rootEntry) {
-    console.error(`Could not scan ${resolvedRoot} — path missing or unreadable.`);
+  const categoryTotals = {};
+  const start = Date.now();
+
+  // The dashboard's root is synthetic, not a single real filesystem path:
+  // $HOME's own top-level folders plus /Applications, which sits outside
+  // $HOME entirely (per spec.md's Assumptions — macOS Storage settings
+  // covers both, and Applications is real, often-large space that a
+  // $HOME-only scan would silently miss). Each real folder is still
+  // walked and listed normally; only the very top level is synthetic.
+  const topEntries = [];
+  let homeDirents = [];
+  try {
+    homeDirents = await readdir(resolvedRoot, { withFileTypes: true });
+  } catch {
+    console.error(`Could not read ${resolvedRoot} — path missing or unreadable.`);
     process.exitCode = 1;
     return;
   }
+  for (const dirent of homeDirents) {
+    const child = await walk(path.join(resolvedRoot, dirent.name), homeDir, scanDir, categoryTotals);
+    if (child) topEntries.push(child);
+  }
+  // Only merge in /Applications for a real full-home scan — a scoped test
+  // scan (--root ./some/small/folder) shouldn't silently also walk 11GB
+  // of /Applications every time.
+  const includedApplications = resolvedRoot === homeDir;
+  if (includedApplications) {
+    const applicationsEntry = await walk("/Applications", homeDir, scanDir, categoryTotals);
+    if (applicationsEntry) topEntries.push(applicationsEntry);
+  }
 
-  const scannedAt = new Date().toISOString();
-  const snapshot = { scannedAt, durationMs, root: rootEntry };
+  const durationMs = Date.now() - start;
 
-  console.log(`Scanned ${resolvedRoot}`);
+  const ROOT_PATH = "__root__"; // synthetic id, not a real fs path
+  const rollUp = (key) =>
+    topEntries.reduce(
+      (sum, c) => sum + (c.flags.includes("symlink-target-already-counted") ? 0 : c[key]),
+      0,
+    );
+  const rootEntry = {
+    path: ROOT_PATH,
+    name: "This Mac",
+    kind: "directory",
+    sizeBytes: rollUp("sizeBytes"),
+    allocatedBytes: rollUp("allocatedBytes"),
+    category: "other",
+    modifiedAt: scannedAt,
+    lastUsedAt: null,
+    flags: [],
+  };
+  if (scanDir) {
+    await writeFile(
+      path.join(scanDir, listingFilename(ROOT_PATH)),
+      JSON.stringify({ path: ROOT_PATH, entries: topEntries }),
+      "utf8",
+    );
+  }
+
+  console.log(`Scanned ${resolvedRoot}${includedApplications ? " + /Applications" : ""}`);
   console.log(`Total: ${gb(rootEntry.allocatedBytes)} GB in ${durationMs}ms (real disk usage)`);
   console.log("By category:");
-  const byCategory = summarizeByCategory(rootEntry);
-  for (const [cat, bytes] of Object.entries(byCategory).sort((a, b) => b[1] - a[1])) {
+  for (const [cat, bytes] of Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])) {
     console.log(`  ${cat.padEnd(14)} ${gb(bytes)} GB`);
   }
 
@@ -168,20 +236,22 @@ async function main() {
     return;
   }
 
-  const filename = scannedAt.replace(/[:.]/g, "-") + ".json";
-  await mkdir(SCANS_DIR, { recursive: true });
-  await writeFile(path.join(SCANS_DIR, filename), JSON.stringify(snapshot, null, 2) + "\n", "utf8");
+  await writeFile(
+    path.join(scanDir, "meta.json"),
+    JSON.stringify({ scannedAt, durationMs, root: rootEntry, categoryTotals }, null, 2) + "\n",
+    "utf8",
+  );
   await appendIndexEntry({
     date: scannedAt,
     type: "scan",
-    file: `scans/${filename}`,
+    file: `scans/${scanFolderName}/meta.json`,
     totalBytes: rootEntry.allocatedBytes,
     deletedBytes: null,
   });
   const pruned = await pruneOldScans();
 
-  console.log(`\nWrote data/scans/${filename}`);
-  if (pruned.length) console.log(`Pruned ${pruned.length} old scan file(s): ${pruned.join(", ")}`);
+  console.log(`\nWrote data/scans/${scanFolderName}/`);
+  if (pruned.length) console.log(`Pruned ${pruned.length} old scan folder(s): ${pruned.join(", ")}`);
 }
 
 main();

@@ -1,4 +1,4 @@
-import { readFile, writeFile, readdir, unlink } from "node:fs/promises";
+import { readFile, writeFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -46,27 +46,32 @@ export async function appendIndexEntry(entry, indexFile = INDEX_FILE) {
 }
 
 /**
- * Keep only the most recent MAX_RETAINED_SCANS files in data/scans/,
- * deleting the rest. Filenames are ISO-timestamp-prefixed, so lexicographic
- * sort order is chronological order. Returns the list of deleted filenames.
+ * Keep only the most recent MAX_RETAINED_SCANS scan folders in data/scans/,
+ * deleting the rest (recursively — each scan is a folder of per-directory
+ * listing files, not a single file, since a full-disk scan's tree is too
+ * large to hold or write as one JSON document; see scan.mjs). Folder names
+ * are ISO-timestamp-prefixed, so lexicographic sort order is chronological.
+ * Returns the list of deleted folder names.
  *
  * Only ever touches data/scans/ — never data/deletes/ (delete logs are the
  * audit trail; they are not pruned) and never anything outside DATA_DIR.
  */
 export async function pruneOldScans(scansDir = SCANS_DIR, keep = MAX_RETAINED_SCANS) {
-  let files;
+  let entries;
   try {
-    files = (await readdir(scansDir)).filter((f) => f.endsWith(".json"));
+    entries = (await readdir(scansDir, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
   } catch (err) {
     if (err.code === "ENOENT") return [];
     throw err;
   }
 
-  files.sort();
-  const toDelete = files.slice(0, Math.max(0, files.length - keep));
+  entries.sort();
+  const toDelete = entries.slice(0, Math.max(0, entries.length - keep));
 
-  for (const file of toDelete) {
-    await unlink(path.join(scansDir, file));
+  for (const dir of toDelete) {
+    await rm(path.join(scansDir, dir), { recursive: true, force: true });
   }
 
   return toDelete;
