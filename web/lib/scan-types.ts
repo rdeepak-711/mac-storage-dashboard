@@ -48,6 +48,8 @@ export interface ScanSnapshot {
   diskTotalBytes: number;
   diskUsedBytes: number;
   diskFreeBytes: number;
+  /** Computed inline during the walk, bounded to the largest 50 by size. See reclaim-rules.mjs. */
+  cleanupFlags: CleanupFlag[];
 }
 
 export type CleanupConfidence = "safe" | "caution";
@@ -57,6 +59,20 @@ export interface CleanupFlag {
   ruleId: string;
   reason: string;
   confidence: CleanupConfidence;
+  /** Only set for ruleId "duplicate-file": the path of the copy being kept. */
+  duplicateOf?: string;
+}
+
+/**
+ * Added 2026-09-01 (FR-010a): a user-managed, persisted list of real paths
+ * the delete flow must refuse unconditionally. Stored at
+ * data/protected-paths.json, separate from any scan — see
+ * lib/protected-paths.mjs and data-model.md's "Protected Path" section.
+ */
+export interface ProtectedPath {
+  path: string;
+  addedAt: string;
+  note?: string;
 }
 
 export interface AISuggestion {
