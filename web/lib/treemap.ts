@@ -19,6 +19,64 @@ export interface TreemapRect {
   width: number;
   height: number;
   color: string;
+  /** Present only on the synthetic "N more items" cell — see groupSmallEntries(). */
+  groupedCount?: number;
+}
+
+const DEFAULT_MAX_VISIBLE = 40;
+const GROUPED_PATH = "__grouped__";
+
+/**
+ * Added 2026-09-01 — real usability problem found in a real screenshot:
+ * a folder with 95 real items produces dozens of cells too small to
+ * ever show a label, discoverable only by hovering one at a time. That's
+ * not usable. Standard treemap fix: keep the largest `maxVisible - 1`
+ * items individually visible, and fold everything smaller into one
+ * clearly-labeled "N more items" cell — nothing hidden, just legible.
+ * The grouped cell's category is whichever category holds the most
+ * bytes among the folded items, and its size is the real sum — never a
+ * fabricated number.
+ */
+function groupSmallEntries(
+  entries: StorageEntry[],
+  maxVisible: number,
+): { entries: StorageEntry[]; groupedCount: number | null } {
+  const sized = entries.filter((e) => e.allocatedBytes > 0);
+  if (sized.length <= maxVisible) return { entries: sized, groupedCount: null };
+
+  const sorted = [...sized].sort((a, b) => b.allocatedBytes - a.allocatedBytes);
+  const visible = sorted.slice(0, maxVisible - 1);
+  const rest = sorted.slice(maxVisible - 1);
+
+  const totalRest = rest.reduce((sum, e) => sum + e.allocatedBytes, 0);
+  const byCategory = new Map<Category, number>();
+  let latestModified = rest[0]?.modifiedAt ?? new Date(0).toISOString();
+  for (const e of rest) {
+    byCategory.set(e.category, (byCategory.get(e.category) ?? 0) + e.allocatedBytes);
+    if (e.modifiedAt > latestModified) latestModified = e.modifiedAt;
+  }
+  let dominantCategory: Category = "other";
+  let dominantBytes = -1;
+  for (const [category, bytes] of byCategory) {
+    if (bytes > dominantBytes) {
+      dominantBytes = bytes;
+      dominantCategory = category;
+    }
+  }
+
+  const grouped: StorageEntry = {
+    path: GROUPED_PATH,
+    name: `${rest.length} more items`,
+    kind: "directory",
+    sizeBytes: totalRest,
+    allocatedBytes: totalRest,
+    category: dominantCategory,
+    modifiedAt: latestModified,
+    lastUsedAt: null,
+    flags: [],
+  };
+
+  return { entries: [...visible, grouped], groupedCount: rest.length };
 }
 
 interface TreemapRoot {
@@ -102,12 +160,28 @@ export function layoutTreemap(
   entries: StorageEntry[],
   width: number,
   height: number,
+  maxVisible: number = DEFAULT_MAX_VISIBLE,
 ): TreemapRect[] {
-  const sized = entries.filter((e) => e.allocatedBytes > 0);
-  if (sized.length === 0) return [];
+  const { entries: displayEntries, groupedCount } = groupSmallEntries(entries, maxVisible);
+  if (displayEntries.length === 0) return [];
 
-  const root = hierarchy<TreemapRoot | StorageEntry>({ children: sized })
-    .sum((d) => ("allocatedBytes" in d ? d.allocatedBytes : 0))
+  // The grouped "N more items" cell exists specifically to stay legible —
+  // that's its entire purpose. But its real byte share can still be tiny
+  // (a real bug caught in verification: it rendered at 16x16px, completely
+  // empty — exactly the problem it was built to solve). Its layout AREA
+  // gets a guaranteed floor (MIN_GROUPED_SHARE of the total); the number
+  // it displays (allocatedBytes on the returned rect) stays the real,
+  // un-inflated value — only where the squarified algorithm places it is
+  // adjusted, never what it claims to be.
+  const MIN_GROUPED_SHARE = 0.03;
+  const totalBytes = displayEntries.reduce((sum, e) => sum + e.allocatedBytes, 0);
+
+  const root = hierarchy<TreemapRoot | StorageEntry>({ children: displayEntries })
+    .sum((d) => {
+      if (!("allocatedBytes" in d)) return 0;
+      if (d.path === GROUPED_PATH) return Math.max(d.allocatedBytes, totalBytes * MIN_GROUPED_SHARE);
+      return d.allocatedBytes;
+    })
     .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
 
   const layout = treemap<TreemapRoot | StorageEntry>()
@@ -119,6 +193,7 @@ export function layoutTreemap(
 
   return positioned.leaves().map((node) => {
     const entry = node.data as StorageEntry;
+    const isGrouped = entry.path === GROUPED_PATH;
     return {
       path: entry.path,
       name: entry.name,
@@ -130,6 +205,7 @@ export function layoutTreemap(
       width: node.x1 - node.x0,
       height: node.y1 - node.y0,
       color: cellColor(entry.category, entry.path),
+      groupedCount: isGrouped ? (groupedCount ?? undefined) : undefined,
     };
   });
 }

@@ -146,6 +146,7 @@ export default function Home() {
         {rects.map((r) => {
           const isHovered = r.path === hoveredPath;
           const isDimmed = hoveredPath !== null && !isHovered;
+          const isGrouped = r.groupedCount !== undefined;
           return (
             <div
               key={r.path}
@@ -158,13 +159,17 @@ export default function Home() {
                 height: r.height,
                 background: r.color,
                 opacity: isDimmed ? 0.55 : 1,
+                outline: isGrouped ? "2px dashed var(--bg)" : undefined,
+                outlineOffset: isGrouped ? -4 : undefined,
                 boxShadow: isHovered ? "inset 0 0 0 2px var(--text-primary)" : undefined,
                 zIndex: isHovered ? 1 : 0,
               }}
             >
               {r.width > 60 && r.height > 30 && (
                 <>
-                  <div className="truncate text-xs font-semibold text-[var(--bg)]">{r.name}</div>
+                  <div className="truncate text-xs font-semibold text-[var(--bg)]">
+                    {isGrouped ? `+ ${r.name}` : r.name}
+                  </div>
                   <div className="font-[family-name:var(--font-data)] text-[11px] text-[var(--bg)] opacity-80">
                     {formatGB(r.allocatedBytes)}
                   </div>
@@ -182,10 +187,12 @@ export default function Home() {
           <div className="flex w-full items-center gap-3 text-[var(--text-primary)]">
             <span className="truncate font-medium">{hovered.name}</span>
             <span className="rounded-sm border border-[var(--border)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--text-secondary)]">
-              {categoryLabel(hovered.category)}
+              {hovered.groupedCount !== undefined ? "mixed, mostly " + categoryLabel(hovered.category) : categoryLabel(hovered.category)}
             </span>
             <span className="text-[var(--text-secondary)]">{formatGB(hovered.allocatedBytes)}</span>
-            <span className="ml-auto truncate text-[var(--text-secondary)]">{hovered.path}</span>
+            <span className="ml-auto truncate text-[var(--text-secondary)]">
+              {hovered.groupedCount !== undefined ? "smallest items, grouped for legibility" : hovered.path}
+            </span>
           </div>
         ) : (
           <span className="text-[var(--text-secondary)]">
