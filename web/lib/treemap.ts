@@ -23,60 +23,72 @@ export interface TreemapRect {
   groupedCount?: number;
 }
 
-const DEFAULT_MAX_VISIBLE = 40;
 const GROUPED_PATH = "__grouped__";
+// Matches the exact label-visibility check in app/page.tsx
+// (r.width > 60 && r.height > 30) — kept in sync deliberately, not
+// re-derived, since the whole point is these two must agree.
+const MIN_LABEL_WIDTH = 60;
+const MIN_LABEL_HEIGHT = 30;
+// The grouped "N more items" cell gets a guaranteed minimum layout AREA
+// regardless of its real byte share — its whole purpose is staying
+// legible. The number it displays stays the real, un-inflated total;
+// only where the squarified algorithm places it is adjusted.
+const MIN_GROUPED_SHARE = 0.03;
+// Bounded, not unbounded — each pass can only shrink the visible set
+// (never grow it back), so this terminates well before the cap in
+// practice; the cap just guards against surprises.
+const MAX_GROUPING_ITERATIONS = 8;
 
-/**
- * Added 2026-09-01 — real usability problem found in a real screenshot:
- * a folder with 95 real items produces dozens of cells too small to
- * ever show a label, discoverable only by hovering one at a time. That's
- * not usable. Standard treemap fix: keep the largest `maxVisible - 1`
- * items individually visible, and fold everything smaller into one
- * clearly-labeled "N more items" cell — nothing hidden, just legible.
- * The grouped cell's category is whichever category holds the most
- * bytes among the folded items, and its size is the real sum — never a
- * fabricated number.
- */
-function groupSmallEntries(
-  entries: StorageEntry[],
-  maxVisible: number,
-): { entries: StorageEntry[]; groupedCount: number | null } {
-  const sized = entries.filter((e) => e.allocatedBytes > 0);
-  if (sized.length <= maxVisible) return { entries: sized, groupedCount: null };
-
-  const sorted = [...sized].sort((a, b) => b.allocatedBytes - a.allocatedBytes);
-  const visible = sorted.slice(0, maxVisible - 1);
-  const rest = sorted.slice(maxVisible - 1);
-
-  const totalRest = rest.reduce((sum, e) => sum + e.allocatedBytes, 0);
+function dominantCategoryAndLatestDate(items: StorageEntry[]): { category: Category; modifiedAt: string } {
   const byCategory = new Map<Category, number>();
-  let latestModified = rest[0]?.modifiedAt ?? new Date(0).toISOString();
-  for (const e of rest) {
+  let latestModified = items[0]?.modifiedAt ?? new Date(0).toISOString();
+  for (const e of items) {
     byCategory.set(e.category, (byCategory.get(e.category) ?? 0) + e.allocatedBytes);
     if (e.modifiedAt > latestModified) latestModified = e.modifiedAt;
   }
-  let dominantCategory: Category = "other";
-  let dominantBytes = -1;
-  for (const [category, bytes] of byCategory) {
-    if (bytes > dominantBytes) {
-      dominantBytes = bytes;
-      dominantCategory = category;
+  let category: Category = "other";
+  let maxBytes = -1;
+  for (const [c, bytes] of byCategory) {
+    if (bytes > maxBytes) {
+      maxBytes = bytes;
+      category = c;
     }
   }
+  return { category, modifiedAt: latestModified };
+}
 
-  const grouped: StorageEntry = {
+function buildGroupedEntry(folded: StorageEntry[]): StorageEntry {
+  const { category, modifiedAt } = dominantCategoryAndLatestDate(folded);
+  const totalBytes = folded.reduce((sum, e) => sum + e.allocatedBytes, 0);
+  return {
     path: GROUPED_PATH,
-    name: `${rest.length} more items`,
+    name: `${folded.length} more items`,
     kind: "directory",
-    sizeBytes: totalRest,
-    allocatedBytes: totalRest,
-    category: dominantCategory,
-    modifiedAt: latestModified,
+    sizeBytes: totalBytes,
+    allocatedBytes: totalBytes,
+    category,
+    modifiedAt,
     lastUsedAt: null,
     flags: [],
   };
+}
 
-  return { entries: [...visible, grouped], groupedCount: rest.length };
+function runSquarifiedLayout(entries: StorageEntry[], width: number, height: number) {
+  const totalBytes = entries.reduce((sum, e) => sum + e.allocatedBytes, 0);
+  const root = hierarchy<TreemapRoot | StorageEntry>({ children: entries })
+    .sum((d) => {
+      if (!("allocatedBytes" in d)) return 0;
+      if (d.path === GROUPED_PATH) return Math.max(d.allocatedBytes, totalBytes * MIN_GROUPED_SHARE);
+      return d.allocatedBytes;
+    })
+    .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+
+  const layout = treemap<TreemapRoot | StorageEntry>()
+    .tile(treemapSquarify)
+    .size([width, height])
+    .paddingInner(2);
+
+  return layout(root).leaves();
 }
 
 interface TreemapRoot {
@@ -160,38 +172,52 @@ export function layoutTreemap(
   entries: StorageEntry[],
   width: number,
   height: number,
-  maxVisible: number = DEFAULT_MAX_VISIBLE,
 ): TreemapRect[] {
-  const { entries: displayEntries, groupedCount } = groupSmallEntries(entries, maxVisible);
-  if (displayEntries.length === 0) return [];
+  let visible = entries.filter((e) => e.allocatedBytes > 0);
+  let folded: StorageEntry[] = [];
+  if (visible.length === 0) return [];
 
-  // The grouped "N more items" cell exists specifically to stay legible —
-  // that's its entire purpose. But its real byte share can still be tiny
-  // (a real bug caught in verification: it rendered at 16x16px, completely
-  // empty — exactly the problem it was built to solve). Its layout AREA
-  // gets a guaranteed floor (MIN_GROUPED_SHARE of the total); the number
-  // it displays (allocatedBytes on the returned rect) stays the real,
-  // un-inflated value — only where the squarified algorithm places it is
-  // adjusted, never what it claims to be.
-  const MIN_GROUPED_SHARE = 0.03;
-  const totalBytes = displayEntries.reduce((sum, e) => sum + e.allocatedBytes, 0);
+  // Real usability problem found in a real screenshot, twice: a folder
+  // with many items produces cells too small to ever show a label. Two
+  // earlier fixes (a fixed "top 40" cutoff, then an area-share estimate)
+  // both turned out wrong — verified against real numbers: several cells
+  // cleared the estimated area but were still individually too narrow
+  // (squarified rows share a common height, so area alone doesn't
+  // guarantee both dimensions clear the threshold).
+  //
+  // Correct fix: actually lay out, check the REAL rendered dimensions,
+  // fold anything that still fails into the grouped cell, and lay out
+  // again — until nothing (other than the grouped cell itself, which has
+  // its own guaranteed floor) fails the check. Each pass only shrinks the
+  // visible set, so this provably terminates.
+  let leaves = runSquarifiedLayout(visible, width, height);
 
-  const root = hierarchy<TreemapRoot | StorageEntry>({ children: displayEntries })
-    .sum((d) => {
-      if (!("allocatedBytes" in d)) return 0;
-      if (d.path === GROUPED_PATH) return Math.max(d.allocatedBytes, totalBytes * MIN_GROUPED_SHARE);
-      return d.allocatedBytes;
-    })
-    .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  for (let iteration = 0; iteration < MAX_GROUPING_ITERATIONS && visible.length > 1; iteration++) {
+    const currentSet = folded.length > 0 ? [...visible, buildGroupedEntry(folded)] : visible;
+    leaves = runSquarifiedLayout(currentSet, width, height);
 
-  const layout = treemap<TreemapRoot | StorageEntry>()
-    .tile(treemapSquarify)
-    .size([width, height])
-    .paddingInner(2);
+    const failingPaths = new Set(
+      leaves
+        .filter((node) => {
+          const entry = node.data as StorageEntry;
+          if (entry.path === GROUPED_PATH) return false; // has its own guaranteed floor
+          const w = (node.x1 ?? 0) - (node.x0 ?? 0);
+          const h = (node.y1 ?? 0) - (node.y0 ?? 0);
+          return !(w > MIN_LABEL_WIDTH && h > MIN_LABEL_HEIGHT);
+        })
+        .map((node) => (node.data as StorageEntry).path),
+    );
 
-  const positioned = layout(root);
+    if (failingPaths.size === 0) break;
 
-  return positioned.leaves().map((node) => {
+    folded = [...folded, ...visible.filter((e) => failingPaths.has(e.path))];
+    visible = visible.filter((e) => !failingPaths.has(e.path));
+    // Loop re-runs with the shrunk visible set + updated grouped entry.
+    // Final `leaves` used below is always from the layout matching the
+    // returned visible/folded state, since we re-assign it every pass.
+  }
+
+  return leaves.map((node) => {
     const entry = node.data as StorageEntry;
     const isGrouped = entry.path === GROUPED_PATH;
     return {
@@ -205,7 +231,7 @@ export function layoutTreemap(
       width: node.x1 - node.x0,
       height: node.y1 - node.y0,
       color: cellColor(entry.category, entry.path),
-      groupedCount: isGrouped ? (groupedCount ?? undefined) : undefined,
+      groupedCount: isGrouped ? folded.length : undefined,
     };
   });
 }
