@@ -3,15 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { layoutTreemap, type TreemapRect } from "@/lib/treemap";
+import { formatBytes, categoryLabel } from "@/lib/format";
 import type { ScanSnapshot, StorageEntry } from "@/lib/scan-types";
-
-function formatGB(bytes: number) {
-  return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
-}
-
-function categoryLabel(category: string) {
-  return category.replace("-", " ");
-}
 
 type Status = "loading" | "idle" | "scanning" | "error";
 
@@ -30,6 +23,7 @@ export default function BrowsePage() {
   const [elapsedSec, setElapsedSec] = useState(0);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [hoveredPath, setHoveredPath] = useState<string | null>(null);
+  const [cursor, setCursor] = useState({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
 
   const loadEntriesFor = useCallback(async (rootPath: string) => {
@@ -92,6 +86,11 @@ export default function BrowsePage() {
 
   const hovered = rects.find((r) => r.path === hoveredPath) ?? null;
 
+  const tooltipWidth = 260;
+  const tooltipHeight = 64;
+  const tooltipX = Math.min(cursor.x + 16, Math.max(0, size.width - tooltipWidth - 8));
+  const tooltipY = Math.min(cursor.y + 16, Math.max(0, size.height - tooltipHeight - 8));
+
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       <header className="flex items-center justify-between border-b border-[var(--border)] px-6 py-5">
@@ -103,7 +102,7 @@ export default function BrowsePage() {
             ← Categories
           </Link>
           <div className="font-[family-name:var(--font-data)] text-3xl font-semibold tracking-tight text-[var(--text-primary)]">
-            {scan ? formatGB(scan.root.allocatedBytes) : "—"}
+            {scan ? formatBytes(scan.root.allocatedBytes) : "—"}
           </div>
           <div className="flex flex-col">
             <span className="text-xs uppercase tracking-wide text-[var(--text-secondary)]">
@@ -135,6 +134,10 @@ export default function BrowsePage() {
         ref={containerRef}
         className="relative flex-1 overflow-hidden"
         onMouseLeave={() => setHoveredPath(null)}
+        onMouseMove={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          setCursor({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+        }}
       >
         {status === "loading" && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
@@ -179,13 +182,30 @@ export default function BrowsePage() {
                     {isGrouped ? `+ ${r.name}` : r.name}
                   </div>
                   <div className="font-[family-name:var(--font-data)] text-[11px] text-[var(--bg)] opacity-80">
-                    {formatGB(r.allocatedBytes)}
+                    {formatBytes(r.allocatedBytes)}
                   </div>
                 </>
               )}
             </div>
           );
         })}
+
+        {hovered && (
+          <div
+            className="pointer-events-none absolute z-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 shadow-lg"
+            style={{ left: tooltipX, top: tooltipY, width: tooltipWidth }}
+          >
+            <div className="truncate text-sm font-semibold text-[var(--text-primary)]">{hovered.name}</div>
+            <div className="flex items-center gap-2">
+              <span className="font-[family-name:var(--font-data)] text-xs text-[var(--text-secondary)]">
+                {formatBytes(hovered.allocatedBytes)}
+              </span>
+              <span className="rounded-sm border border-[var(--border)] px-1 py-0.5 text-[10px] uppercase tracking-wide text-[var(--text-secondary)]">
+                {hovered.groupedCount !== undefined ? "mixed" : categoryLabel(hovered.category)}
+              </span>
+            </div>
+          </div>
+        )}
       </main>
 
       <footer className="flex h-10 items-center border-t border-[var(--border)] bg-[var(--surface)] px-6 font-[family-name:var(--font-data)] text-xs">
@@ -195,7 +215,7 @@ export default function BrowsePage() {
             <span className="rounded-sm border border-[var(--border)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--text-secondary)]">
               {hovered.groupedCount !== undefined ? "mixed, mostly " + categoryLabel(hovered.category) : categoryLabel(hovered.category)}
             </span>
-            <span className="text-[var(--text-secondary)]">{formatGB(hovered.allocatedBytes)}</span>
+            <span className="text-[var(--text-secondary)]">{formatBytes(hovered.allocatedBytes)}</span>
             <span className="ml-auto truncate text-[var(--text-secondary)]">
               {hovered.groupedCount !== undefined ? "smallest items, grouped for legibility" : hovered.path}
             </span>

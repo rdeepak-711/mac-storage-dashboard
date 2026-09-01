@@ -3,15 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { layoutTreemap, type TreemapRect } from "@/lib/treemap";
+import { formatBytes, categoryLabel } from "@/lib/format";
 import type { Category, ScanSnapshot } from "@/lib/scan-types";
-
-function formatGB(bytes: number) {
-  return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
-}
-
-function categoryLabel(category: string) {
-  return category.replace("-", " ");
-}
 
 type Status = "loading" | "idle" | "scanning" | "error";
 
@@ -37,6 +30,7 @@ export default function Home() {
   const [elapsedSec, setElapsedSec] = useState(0);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [hoveredPath, setHoveredPath] = useState<string | null>(null);
+  const [cursor, setCursor] = useState({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -112,16 +106,25 @@ export default function Home() {
 
   const hovered = rects.find((r) => r.path === hoveredPath) ?? null;
 
+  // Tooltip position, clamped so it never renders off the right/bottom
+  // edge of the treemap area. Added 2026-09-01: the footer-only hover
+  // feedback made the eye travel away from the hovered cell — this
+  // shows up right where you're already looking.
+  const tooltipWidth = 200;
+  const tooltipHeight = 52;
+  const tooltipX = Math.min(cursor.x + 16, Math.max(0, size.width - tooltipWidth - 8));
+  const tooltipY = Math.min(cursor.y + 16, Math.max(0, size.height - tooltipHeight - 8));
+
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       <header className="flex items-center justify-between border-b border-[var(--border)] px-6 py-5">
         <div className="flex items-baseline gap-3">
           <div className="font-[family-name:var(--font-data)] text-3xl font-semibold tracking-tight text-[var(--text-primary)]">
-            {scan ? formatGB(scan.diskUsedBytes) : "—"}
+            {scan ? formatBytes(scan.diskUsedBytes) : "—"}
           </div>
           <div className="flex flex-col">
             <span className="text-xs uppercase tracking-wide text-[var(--text-secondary)]">
-              {scan ? `of ${formatGB(scan.diskTotalBytes)} used — rest is free` : "No scan yet"}
+              {scan ? `of ${formatBytes(scan.diskTotalBytes)} used — rest is free` : "No scan yet"}
             </span>
             {scan && (
               <span className="text-xs text-[var(--text-secondary)]">
@@ -157,6 +160,10 @@ export default function Home() {
         ref={containerRef}
         className="relative flex-1 overflow-hidden"
         onMouseLeave={() => setHoveredPath(null)}
+        onMouseMove={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          setCursor({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+        }}
       >
         {status === "loading" && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
@@ -198,20 +205,32 @@ export default function Home() {
                     {r.name}
                   </div>
                   <div className="font-[family-name:var(--font-data)] text-xs text-[var(--bg)] opacity-80">
-                    {formatGB(r.allocatedBytes)}
+                    {formatBytes(r.allocatedBytes)}
                   </div>
                 </>
               )}
             </div>
           );
         })}
+
+        {hovered && (
+          <div
+            className="pointer-events-none absolute z-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 shadow-lg"
+            style={{ left: tooltipX, top: tooltipY, width: tooltipWidth }}
+          >
+            <div className="truncate text-sm font-semibold text-[var(--text-primary)]">{hovered.name}</div>
+            <div className="font-[family-name:var(--font-data)] text-xs text-[var(--text-secondary)]">
+              {formatBytes(hovered.allocatedBytes)}
+            </div>
+          </div>
+        )}
       </main>
 
       <footer className="flex h-10 items-center border-t border-[var(--border)] bg-[var(--surface)] px-6 font-[family-name:var(--font-data)] text-xs">
         {hovered ? (
           <div className="flex w-full items-center gap-3 text-[var(--text-primary)]">
             <span className="truncate font-medium">{hovered.name}</span>
-            <span className="text-[var(--text-secondary)]">{formatGB(hovered.allocatedBytes)}</span>
+            <span className="text-[var(--text-secondary)]">{formatBytes(hovered.allocatedBytes)}</span>
           </div>
         ) : (
           <span className="text-[var(--text-secondary)]">
