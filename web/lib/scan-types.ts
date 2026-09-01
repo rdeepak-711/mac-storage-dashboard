@@ -50,6 +50,14 @@ export interface ScanSnapshot {
   diskFreeBytes: number;
   /** Computed inline during the walk, bounded to the largest 50 by size. See reclaim-rules.mjs. */
   cleanupFlags: CleanupFlag[];
+  /**
+   * Real folders the scanner couldn't read (readdir failed — almost
+   * always a missing Full Disk Access grant for whatever process ran the
+   * scan). Added 2026-09-01 after finding ~/Library/Mail, Messages,
+   * Photos, Safari etc. were silently reporting as 0GB on a real Mac
+   * without FDA granted — this makes that gap visible instead of hidden.
+   */
+  restrictedPaths: { path: string; name: string }[];
 }
 
 export type CleanupConfidence = "safe" | "caution";

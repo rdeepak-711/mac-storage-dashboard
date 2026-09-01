@@ -57,8 +57,18 @@ const visitedInodes = new Set();
  * the cheap part (group candidate paths by exact size) happens here;
  * the actual content-hash comparison runs once, after the walk, in
  * main() — see findDuplicates().
+ *
+ * restrictedPaths (added 2026-09-01, real gap found on Deepak's own Mac):
+ * every directory whose readdir() failed with a permission error was
+ * already silently marked with the "restricted" flag and reported as
+ * 0 bytes — technically correct, but invisible. On a real Mac without
+ * Full Disk Access granted to whatever process runs the scanner, this
+ * silently hid real user data (~/Library/Mail, Messages, Photos, Safari,
+ * etc. all showed as 0GB with no visible explanation). Collecting them
+ * here lets meta.json report "N folders couldn't be read" so the UI can
+ * tell the user this is fixable, instead of a number that's just wrong.
  */
-async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates, duplicateCandidatesBySize) {
+async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates, duplicateCandidatesBySize, restrictedPaths) {
   let stat;
   try {
     stat = await lstat(absPath);
@@ -112,6 +122,7 @@ async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates
   try {
     dirents = await readdir(absPath, { withFileTypes: true });
   } catch {
+    restrictedPaths.push({ path: absPath, name });
     return {
       path: absPath,
       name,
@@ -134,6 +145,7 @@ async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates
       categoryTotals,
       reclaimCandidates,
       duplicateCandidatesBySize,
+      restrictedPaths,
     );
     if (child) children.push(child);
   }
@@ -250,6 +262,7 @@ async function main() {
   const categoryTotals = {};
   const reclaimCandidates = [];
   const duplicateCandidatesBySize = new Map();
+  const restrictedPaths = [];
   const start = Date.now();
 
   // The dashboard's root is synthetic, not a single real filesystem path:
@@ -275,6 +288,7 @@ async function main() {
       categoryTotals,
       reclaimCandidates,
       duplicateCandidatesBySize,
+      restrictedPaths,
     );
     if (child) topEntries.push(child);
   }
@@ -290,6 +304,7 @@ async function main() {
       categoryTotals,
       reclaimCandidates,
       duplicateCandidatesBySize,
+      restrictedPaths,
     );
     if (applicationsEntry) {
       // $HOME often has its own (usually near-empty) "Applications" folder
@@ -347,6 +362,22 @@ async function main() {
   const duplicateFlags = await findDuplicateFlags(duplicateCandidatesBySize);
   const cleanupFlags = boundFlags([...reclaimCandidates, ...duplicateFlags]);
 
+  // Defensive cap only — bounded by however many protected macOS folders
+  // (and their nested subfolders) exist under $HOME, never by disk size.
+  // CAUGHT FOR REAL 2026-09-01: an earlier cap of 100 turned out too
+  // tight — a real full scan of Deepak's own Mac found 146 restricted
+  // paths (counting nested subfolders, not just top-level ones), so that
+  // cap was silently dropping 46 real entries. Raised generously above
+  // the observed real value; if this ever binds, say so explicitly
+  // rather than truncating silently.
+  const MAX_RESTRICTED = 500;
+  const boundedRestrictedPaths = restrictedPaths.slice(0, MAX_RESTRICTED);
+  if (restrictedPaths.length > MAX_RESTRICTED) {
+    console.warn(
+      `restrictedPaths truncated: ${restrictedPaths.length} found, only the first ${MAX_RESTRICTED} kept`,
+    );
+  }
+
   console.log(`Scanned ${resolvedRoot}${includedApplications ? " + /Applications" : ""}`);
   console.log(`Total: ${gb(rootEntry.allocatedBytes)} GB in ${durationMs}ms (real disk usage)`);
   console.log(`Disk: ${gb(diskUsedBytes)} GB used of ${gb(diskTotalBytes)} GB total (${gb(diskFreeBytes)} GB free)`);
@@ -355,6 +386,9 @@ async function main() {
     console.log(`  ${cat.padEnd(14)} ${gb(bytes)} GB`);
   }
   console.log(`Cleanup flags: ${cleanupFlags.length} (of ${reclaimCandidates.length + duplicateFlags.length} found, bounded to largest)`);
+  if (restrictedPaths.length > 0) {
+    console.log(`Restricted (couldn't read, likely missing Full Disk Access): ${restrictedPaths.length}`);
+  }
 
   if (dryRun) {
     console.log("\n--dry-run: nothing written to data/");
@@ -373,6 +407,7 @@ async function main() {
         diskUsedBytes,
         diskFreeBytes,
         cleanupFlags,
+        restrictedPaths: boundedRestrictedPaths,
       },
       null,
       2,

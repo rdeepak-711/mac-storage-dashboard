@@ -82,6 +82,21 @@ export default function Home() {
 
   const NOT_SCANNED_PATH = "not-scanned";
 
+  // Added 2026-09-01: real folders the scan couldn't read, almost always
+  // because whatever process ran the scanner doesn't have macOS's Full
+  // Disk Access grant — without it, real data (Mail, Messages, Photos,
+  // Safari...) silently reports as 0 bytes with no explanation. Showing
+  // a short, deduplicated, sorted sample of names (not all — restricted
+  // count can run into the hundreds once nested subfolders are counted)
+  // plus a direct link to the exact right Settings pane, so this becomes
+  // a guided fix instead of an invisible gap.
+  const restrictedNames = scan
+    ? [...new Set((scan.restrictedPaths ?? []).map((p) => p.name))].sort()
+    : [];
+  const RESTRICTED_SAMPLE_SIZE = 6;
+  const restrictedSample = restrictedNames.slice(0, RESTRICTED_SAMPLE_SIZE);
+  const restrictedOverflow = restrictedNames.length - restrictedSample.length;
+
   // Real categoryTotals (from the scanner, see data-model.md) turned into
   // the same StorageEntry-like shape layoutTreemap already knows how to
   // lay out — no separate rendering path needed for 9 items.
@@ -186,6 +201,27 @@ export default function Home() {
       {status === "error" && (
         <div className="border-b border-[var(--border)] bg-[var(--surface)] px-6 py-3 text-sm text-red-400">
           Scan failed: {errorMessage}
+        </div>
+      )}
+
+      {restrictedNames.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border)] bg-[var(--surface)] px-6 py-3 text-sm text-[var(--text-secondary)]">
+          <span className="text-[var(--text-primary)]">
+            {restrictedNames.length} folder{restrictedNames.length === 1 ? "" : "s"} couldn&apos;t be read
+            {restrictedSample.length > 0 && (
+              <>
+                {" "}
+                ({restrictedSample.join(", ")}
+                {restrictedOverflow > 0 ? `, +${restrictedOverflow} more` : ""})
+              </>
+            )}
+          </span>
+          <a
+            href="x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+            className="font-medium text-[var(--accent)] transition-colors hover:underline"
+          >
+            Grant Full Disk Access →
+          </a>
         </div>
       )}
 
