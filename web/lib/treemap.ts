@@ -38,6 +38,11 @@ const MIN_GROUPED_SHARE = 0.03;
 // (never grow it back), so this terminates well before the cap in
 // practice; the cap just guards against surprises.
 const MAX_GROUPING_ITERATIONS = 8;
+// Same floor as MIN_GROUPED_SHARE, applied to every entry instead of just
+// the grouped cell — used by noGroup mode (the category-summary page,
+// where there are at most 9 fixed categories and grouping any of them
+// away just hides a real category name for no good reason; see app/page.tsx).
+const MIN_UNGROUPED_SHARE = 0.03;
 
 function dominantCategoryAndLatestDate(items: StorageEntry[]): { category: Category; modifiedAt: string } {
   const byCategory = new Map<Category, number>();
@@ -73,13 +78,13 @@ function buildGroupedEntry(folded: StorageEntry[]): StorageEntry {
   };
 }
 
-function runSquarifiedLayout(entries: StorageEntry[], width: number, height: number) {
+function runSquarifiedLayout(entries: StorageEntry[], width: number, height: number, minShare = 0) {
   const totalBytes = entries.reduce((sum, e) => sum + e.allocatedBytes, 0);
   const root = hierarchy<TreemapRoot | StorageEntry>({ children: entries })
     .sum((d) => {
       if (!("allocatedBytes" in d)) return 0;
-      if (d.path === GROUPED_PATH) return Math.max(d.allocatedBytes, totalBytes * MIN_GROUPED_SHARE);
-      return d.allocatedBytes;
+      const floor = d.path === GROUPED_PATH ? MIN_GROUPED_SHARE : minShare;
+      return Math.max(d.allocatedBytes, totalBytes * floor);
     })
     .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
 
@@ -172,10 +177,40 @@ export function layoutTreemap(
   entries: StorageEntry[],
   width: number,
   height: number,
+  options: { noGroup?: boolean } = {},
 ): TreemapRect[] {
   let visible = entries.filter((e) => e.allocatedBytes > 0);
   let folded: StorageEntry[] = [];
   if (visible.length === 0) return [];
+
+  // noGroup: skip the fold-small-cells-into-"N more items" loop entirely.
+  // Added 2026-09-01 for app/page.tsx's category-summary treemap — there
+  // are at most 9 fixed categories there, never hundreds of real folders,
+  // so grouping the smallest ones away just hides a real category name
+  // Deepak explicitly wants to always see (e.g. "3 more items, 5.0 MB"
+  // instead of "documents", "photos", "mail"). Every entry still gets a
+  // guaranteed minimum layout area (MIN_UNGROUPED_SHARE) so a genuinely
+  // tiny category doesn't shrink to an unreadable sliver — same mechanism
+  // already used for the grouped cell itself, just applied to everyone.
+  if (options.noGroup) {
+    const leaves = runSquarifiedLayout(visible, width, height, MIN_UNGROUPED_SHARE);
+    return leaves.map((node) => {
+      const entry = node.data as StorageEntry;
+      return {
+        path: entry.path,
+        name: entry.name,
+        category: entry.category,
+        kind: entry.kind,
+        allocatedBytes: entry.allocatedBytes,
+        x: node.x0,
+        y: node.y0,
+        width: node.x1 - node.x0,
+        height: node.y1 - node.y0,
+        color: cellColor(entry.category, entry.path),
+        groupedCount: undefined,
+      };
+    });
+  }
 
   // Real usability problem found in a real screenshot, twice: a folder
   // with many items produces cells too small to ever show a label. Two

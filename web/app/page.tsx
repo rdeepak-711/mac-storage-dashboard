@@ -128,9 +128,13 @@ export default function Home() {
     });
   }
 
+  // noGroup: true — there are at most 9 fixed categories here, so every
+  // one of them should always show its own real name, never fold into a
+  // "3 more items" cell (that's for /browse, where there can genuinely be
+  // hundreds of real folders — see lib/treemap.ts).
   const rects: TreemapRect[] =
     categoryEntries.length > 0 && size.width > 0 && size.height > 0
-      ? layoutTreemap(categoryEntries, size.width, size.height)
+      ? layoutTreemap(categoryEntries, size.width, size.height, { noGroup: true })
       : [];
 
   const hovered = rects.find((r) => r.path === hoveredPath) ?? null;
@@ -233,9 +237,9 @@ export default function Home() {
             >
               {r.width > 60 && r.height > 30 && (
                 <>
-                  <div className="flex items-center gap-1 truncate text-sm font-semibold uppercase tracking-wide text-[var(--bg)]">
+                  <div className="flex items-start gap-1 text-sm font-semibold uppercase leading-tight tracking-wide text-[var(--bg)] [overflow-wrap:anywhere]">
                     {isViewOnly && <span aria-hidden>🔒</span>}
-                    {isViewOnly ? "System (not scanned)" : r.name}
+                    <span>{isViewOnly ? "System (not scanned)" : r.name}</span>
                   </div>
                   <div className="font-[family-name:var(--font-data)] text-xs text-[var(--bg)] opacity-80">
                     {formatBytes(r.allocatedBytes)}
