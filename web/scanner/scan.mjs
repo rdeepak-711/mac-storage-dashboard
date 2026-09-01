@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 import { readdir, lstat, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { categorize } from "./categorize.mjs";
-import { appendIndexEntry, pruneOldScans, SCANS_DIR } from "../lib/run-index.mjs";
+import { appendIndexEntry, pruneOldScans, listingFilename, SCANS_DIR } from "../lib/run-index.mjs";
 
 /**
  * Recursive filesystem walker.
@@ -38,10 +37,6 @@ const ICLOUD_CHECK_MIN_BYTES = 1_000_000;
 const ICLOUD_ALLOCATED_RATIO = 0.1;
 
 const visitedInodes = new Set();
-
-function listingFilename(absPath) {
-  return createHash("sha1").update(absPath).digest("hex").slice(0, 16) + ".json";
-}
 
 /**
  * Walks absPath. Returns a lightweight StorageEntry summary (never a
@@ -194,7 +189,14 @@ async function main() {
   const includedApplications = resolvedRoot === homeDir;
   if (includedApplications) {
     const applicationsEntry = await walk("/Applications", homeDir, scanDir, categoryTotals);
-    if (applicationsEntry) topEntries.push(applicationsEntry);
+    if (applicationsEntry) {
+      // $HOME often has its own (usually near-empty) "Applications" folder
+      // too — real, found via a live test: both would otherwise display
+      // with the identical name "Applications" at the top level, with no
+      // way to tell which is which without reading the raw path.
+      applicationsEntry.name = "Applications (system-wide)";
+      topEntries.push(applicationsEntry);
+    }
   }
 
   const durationMs = Date.now() - start;

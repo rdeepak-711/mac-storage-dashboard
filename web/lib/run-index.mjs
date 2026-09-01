@@ -1,5 +1,6 @@
 import { readFile, writeFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 /**
  * Read/append/prune helpers for data/index.json and data/scans/.
@@ -75,6 +76,26 @@ export async function pruneOldScans(scansDir = SCANS_DIR, keep = MAX_RETAINED_SC
   }
 
   return toDelete;
+}
+
+/**
+ * The filename (no directory) a given absolute path's Directory Listing is
+ * stored under within a scan folder. MUST be identical wherever a listing
+ * is written (scanner/scan.mjs) or read (app/api/browse/route.ts) — kept
+ * here, once, so there is no way for the two to drift apart.
+ */
+export function listingFilename(absPath) {
+  return createHash("sha1").update(absPath).digest("hex").slice(0, 16) + ".json";
+}
+
+/**
+ * The most recent IndexEntry of the given type ("scan" or "delete"), or
+ * null if none exists yet.
+ */
+export async function latestEntry(type, indexFile = INDEX_FILE) {
+  const entries = await readIndex(indexFile);
+  const matching = entries.filter((e) => e.type === type);
+  return matching.length ? matching[matching.length - 1] : null;
 }
 
 export { DATA_DIR, INDEX_FILE, SCANS_DIR, DELETES_DIR };
