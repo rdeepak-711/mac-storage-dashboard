@@ -7,6 +7,29 @@ import { latestEntry, DATA_DIR } from "@/lib/run-index.mjs";
 
 const execFileAsync = promisify(execFile);
 
+async function readLatestMeta() {
+  const latest = await latestEntry("scan");
+  if (!latest) return null;
+  const metaPath = path.join(DATA_DIR, latest.file);
+  return JSON.parse(await readFile(metaPath, "utf8"));
+}
+
+/**
+ * GET /api/scan — added 2026-09-01, alongside T010.
+ *
+ * Reads the most recent scan's meta.json WITHOUT running a new scan.
+ * The treemap page needs this: opening the page should show whatever
+ * data already exists, not force a fresh multi-minute scan on every
+ * visit — that's what the "Refresh" button (POST) is explicitly for.
+ * Returns `{ scan: null }` (200, not an error) when no scan has ever
+ * run — constitution Principle II: an empty/pending state, not a
+ * fabricated result.
+ */
+export async function GET() {
+  const meta = await readLatestMeta();
+  return NextResponse.json({ scan: meta });
+}
+
 /**
  * POST /api/scan — per contracts/api.md.
  *
@@ -28,15 +51,13 @@ export async function POST() {
     );
   }
 
-  const latest = await latestEntry("scan");
-  if (!latest) {
+  const meta = await readLatestMeta();
+  if (!meta) {
     return NextResponse.json(
       { error: "scan failed", detail: "scanner exited cleanly but recorded no scan" },
       { status: 500 },
     );
   }
 
-  const metaPath = path.join(DATA_DIR, latest.file);
-  const meta = JSON.parse(await readFile(metaPath, "utf8"));
   return NextResponse.json(meta);
 }
