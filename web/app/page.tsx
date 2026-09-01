@@ -80,28 +80,57 @@ export default function Home() {
     }
   }
 
+  const NOT_SCANNED_PATH = "not-scanned";
+
   // Real categoryTotals (from the scanner, see data-model.md) turned into
   // the same StorageEntry-like shape layoutTreemap already knows how to
   // lay out — no separate rendering path needed for 9 items.
+  //
+  // Added 2026-09-01, per Deepak's request: a real "not scanned" segment
+  // — the gap between the real, whole-disk diskUsedBytes (fs.statfsSync)
+  // and what our own categories add up to. This is genuinely real data
+  // (a subtraction of two real numbers, not fabricated) and includes
+  // macOS itself plus root-level system folders we deliberately don't
+  // scan. Rendered as view-only — never selectable, never deletable —
+  // both because it's not a real scanned entry with a real path we could
+  // safely act on, and because this is exactly the kind of system space
+  // that should never be touched by a cleanup tool.
+  const categoryEntries =
+    categoryTotals
+      ? Object.entries(categoryTotals)
+          .filter(([, bytes]) => bytes > 0)
+          .map(([category, bytes]) => ({
+            path: `category:${category}`,
+            name: categoryLabel(category),
+            kind: "directory" as const,
+            sizeBytes: bytes,
+            allocatedBytes: bytes,
+            category: category as Category,
+            modifiedAt: scan?.scannedAt ?? new Date(0).toISOString(),
+            lastUsedAt: null,
+            flags: [],
+          }))
+      : [];
+
+  const scannedTotal = categoryEntries.reduce((sum, e) => sum + e.allocatedBytes, 0);
+  const notScannedBytes = scan ? Math.max(0, scan.diskUsedBytes - scannedTotal) : 0;
+  if (scan && notScannedBytes > 0) {
+    categoryEntries.push({
+      path: NOT_SCANNED_PATH,
+      name: "Not Scanned (System)",
+      kind: "directory" as const,
+      sizeBytes: notScannedBytes,
+      allocatedBytes: notScannedBytes,
+      category: "system-data" as Category,
+      modifiedAt: scan.scannedAt,
+      lastUsedAt: null,
+      flags: [],
+    });
+  }
+
   const rects: TreemapRect[] =
-    categoryTotals && size.width > 0 && size.height > 0
-      ? layoutTreemap(
-          Object.entries(categoryTotals)
-            .filter(([, bytes]) => bytes > 0)
-            .map(([category, bytes]) => ({
-              path: `category:${category}`,
-              name: categoryLabel(category),
-              kind: "directory" as const,
-              sizeBytes: bytes,
-              allocatedBytes: bytes,
-              category: category as Category,
-              modifiedAt: scan?.scannedAt ?? new Date(0).toISOString(),
-              lastUsedAt: null,
-              flags: [],
-            })),
-          size.width,
-          size.height,
-        )
+    categoryEntries.length > 0 && size.width > 0 && size.height > 0
+      ? layoutTreemap(categoryEntries, size.width, size.height)
       : [];
 
   const hovered = rects.find((r) => r.path === hoveredPath) ?? null;
@@ -183,6 +212,7 @@ export default function Home() {
         {rects.map((r) => {
           const isHovered = r.path === hoveredPath;
           const isDimmed = hoveredPath !== null && !isHovered;
+          const isViewOnly = r.path === NOT_SCANNED_PATH;
           return (
             <div
               key={r.path}
@@ -193,7 +223,9 @@ export default function Home() {
                 top: r.y,
                 width: r.width,
                 height: r.height,
-                background: r.color,
+                background: isViewOnly
+                  ? `repeating-linear-gradient(135deg, ${r.color}, ${r.color} 8px, var(--bg) 8px, var(--bg) 9px)`
+                  : r.color,
                 opacity: isDimmed ? 0.55 : 1,
                 boxShadow: isHovered ? "inset 0 0 0 2px var(--text-primary)" : undefined,
                 zIndex: isHovered ? 1 : 0,
@@ -201,11 +233,13 @@ export default function Home() {
             >
               {r.width > 60 && r.height > 30 && (
                 <>
-                  <div className="truncate text-sm font-semibold uppercase tracking-wide text-[var(--bg)]">
-                    {r.name}
+                  <div className="flex items-center gap-1 truncate text-sm font-semibold uppercase tracking-wide text-[var(--bg)]">
+                    {isViewOnly && <span aria-hidden>🔒</span>}
+                    {isViewOnly ? "System (not scanned)" : r.name}
                   </div>
                   <div className="font-[family-name:var(--font-data)] text-xs text-[var(--bg)] opacity-80">
                     {formatBytes(r.allocatedBytes)}
+                    {isViewOnly && " · view only"}
                   </div>
                 </>
               )}
@@ -218,9 +252,12 @@ export default function Home() {
             className="pointer-events-none absolute z-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 shadow-lg"
             style={{ left: tooltipX, top: tooltipY, width: tooltipWidth }}
           >
-            <div className="truncate text-sm font-semibold text-[var(--text-primary)]">{hovered.name}</div>
+            <div className="truncate text-sm font-semibold text-[var(--text-primary)]">
+              {hovered.path === NOT_SCANNED_PATH ? "System (not scanned)" : hovered.name}
+            </div>
             <div className="font-[family-name:var(--font-data)] text-xs text-[var(--text-secondary)]">
               {formatBytes(hovered.allocatedBytes)}
+              {hovered.path === NOT_SCANNED_PATH && " · view only"}
             </div>
           </div>
         )}
@@ -228,10 +265,20 @@ export default function Home() {
 
       <footer className="flex h-10 items-center border-t border-[var(--border)] bg-[var(--surface)] px-6 font-[family-name:var(--font-data)] text-xs">
         {hovered ? (
-          <div className="flex w-full items-center gap-3 text-[var(--text-primary)]">
-            <span className="truncate font-medium">{hovered.name}</span>
-            <span className="text-[var(--text-secondary)]">{formatBytes(hovered.allocatedBytes)}</span>
-          </div>
+          hovered.path === NOT_SCANNED_PATH ? (
+            <div className="flex w-full items-center gap-3 text-[var(--text-primary)]">
+              <span className="truncate font-medium">🔒 System (not scanned)</span>
+              <span className="text-[var(--text-secondary)]">{formatBytes(hovered.allocatedBytes)}</span>
+              <span className="ml-auto truncate text-[var(--text-secondary)]">
+                Includes macOS itself and system-internal folders this tool deliberately doesn&apos;t scan — never selectable, never deletable.
+              </span>
+            </div>
+          ) : (
+            <div className="flex w-full items-center gap-3 text-[var(--text-primary)]">
+              <span className="truncate font-medium">{hovered.name}</span>
+              <span className="text-[var(--text-secondary)]">{formatBytes(hovered.allocatedBytes)}</span>
+            </div>
+          )
         ) : (
           <span className="text-[var(--text-secondary)]">
             {rects.length > 0 ? "hover any category for its total — click \"Browse by folder\" to see real files" : ""}
