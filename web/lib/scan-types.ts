@@ -58,6 +58,16 @@ export interface ScanSnapshot {
    * without FDA granted — this makes that gap visible instead of hidden.
    */
   restrictedPaths: { path: string; name: string }[];
+  /**
+   * Added 2026-09-01: the real `.app` bundle (Terminal, VS Code, etc.)
+   * that actually launched the scanner process, detected by walking the
+   * real process tree via `ps` — see scanner/scan.mjs's detectHostApp().
+   * macOS's own "Full Disk Access" Settings pane doesn't say which app to
+   * add; this is the one piece of information we have that it doesn't.
+   * null when nothing was restricted, or when detection failed/found no
+   * `.app` ancestor (e.g. running outside a normal app-launched shell).
+   */
+  scannerHostApp: string | null;
 }
 
 export type CleanupConfidence = "safe" | "caution";

@@ -205,23 +205,48 @@ export default function Home() {
       )}
 
       {restrictedNames.length > 0 && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border)] bg-[var(--surface)] px-6 py-3 text-sm text-[var(--text-secondary)]">
-          <span className="text-[var(--text-primary)]">
-            {restrictedNames.length} folder{restrictedNames.length === 1 ? "" : "s"} couldn&apos;t be read
-            {restrictedSample.length > 0 && (
+        <div className="flex flex-col gap-1 border-b border-[var(--border)] bg-[var(--surface)] px-6 py-3 text-sm text-[var(--text-secondary)]">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-[var(--text-primary)]">
+              {restrictedNames.length} folder{restrictedNames.length === 1 ? "" : "s"} couldn&apos;t be read
+              {restrictedSample.length > 0 && (
+                <>
+                  {" "}
+                  ({restrictedSample.join(", ")}
+                  {restrictedOverflow > 0 ? `, +${restrictedOverflow} more` : ""})
+                </>
+              )}
+            </span>
+            <a
+              href="x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+              className="font-medium text-[var(--accent)] transition-colors hover:underline"
+            >
+              Open Full Disk Access settings →
+            </a>
+          </div>
+          {/*
+            Added 2026-09-01: Deepak pointed out the link above just opens
+            System Settings without saying WHAT to grant access to —
+            macOS's own dialog doesn't know or say which app is asking.
+            scannerHostApp is detected server-side by walking the real
+            process tree (scan.mjs's detectHostApp()), so we can actually
+            answer that instead of leaving it to guesswork.
+          */}
+          <p>
+            {scan?.scannerHostApp ? (
               <>
-                {" "}
-                ({restrictedSample.join(", ")}
-                {restrictedOverflow > 0 ? `, +${restrictedOverflow} more` : ""})
+                In the list that opens, click <strong className="text-[var(--text-primary)]">+</strong>, add{" "}
+                <strong className="text-[var(--text-primary)]">{scan.scannerHostApp}</strong> from Applications,
+                turn it on, then fully quit and reopen {scan.scannerHostApp} before running another scan.
+              </>
+            ) : (
+              <>
+                In the list that opens, click <strong className="text-[var(--text-primary)]">+</strong> and add
+                whichever app you used to start this dev server (Terminal, VS Code, etc.), turn it on, then
+                fully quit and reopen that app before running another scan.
               </>
             )}
-          </span>
-          <a
-            href="x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-            className="font-medium text-[var(--accent)] transition-colors hover:underline"
-          >
-            Grant Full Disk Access →
-          </a>
+          </p>
         </div>
       )}
 

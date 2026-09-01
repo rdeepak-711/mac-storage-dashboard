@@ -1,11 +1,46 @@
 #!/usr/bin/env node
 import { readdir, lstat, mkdir, writeFile } from "node:fs/promises";
 import { statfsSync, createReadStream } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { categorize } from "./categorize.mjs";
 import { evaluateEntry, boundFlags, DUPLICATE_CANDIDATE_MIN_BYTES } from "./reclaim-rules.mjs";
 import { appendIndexEntry, pruneOldScans, listingFilename, SCANS_DIR } from "../lib/run-index.mjs";
+
+/**
+ * Walks up the real process tree (via `ps`, macOS-only) from this
+ * process's parent to find the nearest ancestor that's a `.app` bundle —
+ * Terminal, iTerm, VS Code, Cursor, whatever actually launched
+ * `npm run dev`. Added 2026-09-01: Deepak pointed out that the "Grant
+ * Full Disk Access" link just opens System Settings without saying WHAT
+ * to add — macOS's own dialog doesn't know or say which app needs it.
+ * This is the one piece of information we actually have that the OS
+ * doesn't surface: which real app process is asking. Returns null (never
+ * throws) if `ps` fails or no `.app` ancestor is found within a bounded
+ * number of hops — the UI falls back to generic instructions in that case.
+ */
+function detectHostApp() {
+  try {
+    let pid = process.ppid;
+    for (let i = 0; i < 12; i++) {
+      const out = execFileSync("ps", ["-o", "ppid=,comm=", "-p", String(pid)], {
+        encoding: "utf8",
+      }).trim();
+      if (!out) return null;
+      const spaceIdx = out.indexOf(" ");
+      const parentPid = out.slice(0, spaceIdx).trim();
+      const comm = out.slice(spaceIdx + 1).trim();
+      const match = comm.match(/\/([^/]+)\.app\//);
+      if (match) return match[1];
+      if (!parentPid || parentPid === "1" || parentPid === String(pid)) return null;
+      pid = Number(parentPid);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Recursive filesystem walker.
@@ -386,8 +421,12 @@ async function main() {
     console.log(`  ${cat.padEnd(14)} ${gb(bytes)} GB`);
   }
   console.log(`Cleanup flags: ${cleanupFlags.length} (of ${reclaimCandidates.length + duplicateFlags.length} found, bounded to largest)`);
+  const scannerHostApp = restrictedPaths.length > 0 ? detectHostApp() : null;
   if (restrictedPaths.length > 0) {
-    console.log(`Restricted (couldn't read, likely missing Full Disk Access): ${restrictedPaths.length}`);
+    console.log(
+      `Restricted (couldn't read, likely missing Full Disk Access): ${restrictedPaths.length}` +
+        (scannerHostApp ? ` — grant it to ${scannerHostApp}` : ""),
+    );
   }
 
   if (dryRun) {
@@ -408,6 +447,7 @@ async function main() {
         diskFreeBytes,
         cleanupFlags,
         restrictedPaths: boundedRestrictedPaths,
+        scannerHostApp,
       },
       null,
       2,
