@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readdir, lstat, mkdir, writeFile } from "node:fs/promises";
+import { statfsSync } from "node:fs";
 import path from "node:path";
 import { categorize } from "./categorize.mjs";
 import { appendIndexEntry, pruneOldScans, listingFilename, SCANS_DIR } from "../lib/run-index.mjs";
@@ -226,8 +227,21 @@ async function main() {
     );
   }
 
+  // Real, whole-disk context (added 2026-09-01, per Deepak's request):
+  // the actual volume's total capacity and free space, from the OS
+  // itself (fs.statfsSync) — not derived from our scan, which only
+  // covers a subset ($HOME + /Applications). Shown alongside our
+  // category breakdown so "used X of Y GB total" is honest about how
+  // much of the real disk this tool has actually looked at vs. what
+  // macOS itself reports as used/free.
+  const volumeStats = statfsSync(resolvedRoot);
+  const diskTotalBytes = volumeStats.blocks * volumeStats.bsize;
+  const diskFreeBytes = volumeStats.bavail * volumeStats.bsize;
+  const diskUsedBytes = diskTotalBytes - diskFreeBytes;
+
   console.log(`Scanned ${resolvedRoot}${includedApplications ? " + /Applications" : ""}`);
   console.log(`Total: ${gb(rootEntry.allocatedBytes)} GB in ${durationMs}ms (real disk usage)`);
+  console.log(`Disk: ${gb(diskUsedBytes)} GB used of ${gb(diskTotalBytes)} GB total (${gb(diskFreeBytes)} GB free)`);
   console.log("By category:");
   for (const [cat, bytes] of Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])) {
     console.log(`  ${cat.padEnd(14)} ${gb(bytes)} GB`);
@@ -240,7 +254,11 @@ async function main() {
 
   await writeFile(
     path.join(scanDir, "meta.json"),
-    JSON.stringify({ scannedAt, durationMs, root: rootEntry, categoryTotals }, null, 2) + "\n",
+    JSON.stringify(
+      { scannedAt, durationMs, root: rootEntry, categoryTotals, diskTotalBytes, diskUsedBytes, diskFreeBytes },
+      null,
+      2,
+    ) + "\n",
     "utf8",
   );
   await appendIndexEntry({

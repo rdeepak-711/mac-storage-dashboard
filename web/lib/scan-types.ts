@@ -37,6 +37,17 @@ export interface ScanSnapshot {
   scannedAt: string;
   durationMs: number;
   root: StorageEntry;
+  categoryTotals: Record<Category, number>;
+  /**
+   * Real, whole-disk context from the OS itself (fs.statfsSync), not
+   * derived from our scan — the scan only covers a subset ($HOME +
+   * /Applications). Added 2026-09-01 so the UI can honestly show
+   * "used X of Y GB total" against the real volume, not just our
+   * partial categorized total.
+   */
+  diskTotalBytes: number;
+  diskUsedBytes: number;
+  diskFreeBytes: number;
 }
 
 export type CleanupConfidence = "safe" | "caution";

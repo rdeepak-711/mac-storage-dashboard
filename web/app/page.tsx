@@ -117,11 +117,11 @@ export default function Home() {
       <header className="flex items-center justify-between border-b border-[var(--border)] px-6 py-5">
         <div className="flex items-baseline gap-3">
           <div className="font-[family-name:var(--font-data)] text-3xl font-semibold tracking-tight text-[var(--text-primary)]">
-            {scan ? formatGB(scan.root.allocatedBytes) : "—"}
+            {scan ? formatGB(scan.diskUsedBytes) : "—"}
           </div>
           <div className="flex flex-col">
             <span className="text-xs uppercase tracking-wide text-[var(--text-secondary)]">
-              {scan ? "used" : "No scan yet"}
+              {scan ? `of ${formatGB(scan.diskTotalBytes)} used — rest is free` : "No scan yet"}
             </span>
             {scan && (
               <span className="text-xs text-[var(--text-secondary)]">
