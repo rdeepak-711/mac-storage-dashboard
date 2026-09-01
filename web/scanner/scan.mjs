@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { readdir, lstat, mkdir, writeFile } from "node:fs/promises";
-import { statfsSync } from "node:fs";
+import { statfsSync, createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { categorize } from "./categorize.mjs";
+import { evaluateEntry, boundFlags, DUPLICATE_CANDIDATE_MIN_BYTES } from "./reclaim-rules.mjs";
 import { appendIndexEntry, pruneOldScans, listingFilename, SCANS_DIR } from "../lib/run-index.mjs";
 
 /**
@@ -46,8 +48,17 @@ const visitedInodes = new Set();
  * categoryTotals is mutated in place as leaf files are visited — this is
  * how the overall per-category breakdown is computed without a second
  * pass over a (no-longer-existing) full tree afterward.
+ *
+ * reclaimCandidates and duplicateCandidatesBySize are mutated the same
+ * way — evaluateEntry() (scanner/reclaim-rules.mjs) runs inline on every
+ * entry as it's computed, same reasoning as categoryTotals: re-reading
+ * the scan's ~200k listing files afterward for this would take minutes.
+ * Duplicate detection needs cross-entry state (matching sizes), so only
+ * the cheap part (group candidate paths by exact size) happens here;
+ * the actual content-hash comparison runs once, after the walk, in
+ * main() — see findDuplicates().
  */
-async function walk(absPath, homeDir, scanDir, categoryTotals) {
+async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates, duplicateCandidatesBySize) {
   let stat;
   try {
     stat = await lstat(absPath);
@@ -84,6 +95,15 @@ async function walk(absPath, homeDir, scanDir, categoryTotals) {
     };
     if (!flags.includes("symlink-target-already-counted")) {
       categoryTotals[category] = (categoryTotals[category] ?? 0) + allocatedBytes;
+
+      const flag = evaluateEntry(entry);
+      if (flag) reclaimCandidates.push({ ...flag, allocatedBytes });
+
+      if (allocatedBytes >= DUPLICATE_CANDIDATE_MIN_BYTES) {
+        const bucket = duplicateCandidatesBySize.get(allocatedBytes) ?? [];
+        bucket.push(absPath);
+        duplicateCandidatesBySize.set(allocatedBytes, bucket);
+      }
     }
     return entry;
   }
@@ -107,7 +127,14 @@ async function walk(absPath, homeDir, scanDir, categoryTotals) {
 
   const children = [];
   for (const dirent of dirents) {
-    const child = await walk(path.join(absPath, dirent.name), homeDir, scanDir, categoryTotals);
+    const child = await walk(
+      path.join(absPath, dirent.name),
+      homeDir,
+      scanDir,
+      categoryTotals,
+      reclaimCandidates,
+      duplicateCandidatesBySize,
+    );
     if (child) children.push(child);
   }
 
@@ -126,7 +153,7 @@ async function walk(absPath, homeDir, scanDir, categoryTotals) {
 
   // children is dropped here (goes out of scope) — only the summary below
   // is returned, so the parent never retains this level's data.
-  return {
+  const dirEntry = {
     path: absPath,
     name,
     kind: "directory",
@@ -137,10 +164,68 @@ async function walk(absPath, homeDir, scanDir, categoryTotals) {
     lastUsedAt: null,
     flags,
   };
+
+  const flag = evaluateEntry(dirEntry);
+  if (flag) reclaimCandidates.push({ ...flag, allocatedBytes: dirAllocatedBytes });
+
+  return dirEntry;
 }
 
 function gb(bytes) {
   return (bytes / 1_000_000_000).toFixed(2);
+}
+
+/**
+ * Content-hashes files that already share an identical size — cheap
+ * pre-filter (size grouping happened for free during the main walk),
+ * so this only ever hashes real candidates, never the whole disk.
+ * Bounded further by DUPLICATE_CANDIDATE_MIN_BYTES (50MB) — tiny
+ * duplicate files aren't worth the hashing cost or the user's attention.
+ */
+function hashFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha1");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", reject);
+  });
+}
+
+async function findDuplicateFlags(duplicateCandidatesBySize) {
+  const flags = [];
+  for (const [sizeBytes, paths] of duplicateCandidatesBySize.entries()) {
+    if (paths.length < 2) continue;
+
+    const byHash = new Map();
+    for (const filePath of paths) {
+      let digest;
+      try {
+        digest = await hashFile(filePath);
+      } catch {
+        continue; // vanished or unreadable since the walk saw it — skip, don't fail the scan
+      }
+      const bucket = byHash.get(digest) ?? [];
+      bucket.push(filePath);
+      byHash.set(digest, bucket);
+    }
+
+    for (const matchingPaths of byHash.values()) {
+      if (matchingPaths.length < 2) continue;
+      const [kept, ...duplicates] = matchingPaths;
+      for (const dup of duplicates) {
+        flags.push({
+          path: dup,
+          ruleId: "duplicate-file",
+          reason: `Identical content to ${kept}`,
+          confidence: "caution",
+          duplicateOf: kept,
+          allocatedBytes: sizeBytes,
+        });
+      }
+    }
+  }
+  return flags;
 }
 
 function parseArgs(argv) {
@@ -163,6 +248,8 @@ async function main() {
   if (scanDir) await mkdir(scanDir, { recursive: true });
 
   const categoryTotals = {};
+  const reclaimCandidates = [];
+  const duplicateCandidatesBySize = new Map();
   const start = Date.now();
 
   // The dashboard's root is synthetic, not a single real filesystem path:
@@ -181,7 +268,14 @@ async function main() {
     return;
   }
   for (const dirent of homeDirents) {
-    const child = await walk(path.join(resolvedRoot, dirent.name), homeDir, scanDir, categoryTotals);
+    const child = await walk(
+      path.join(resolvedRoot, dirent.name),
+      homeDir,
+      scanDir,
+      categoryTotals,
+      reclaimCandidates,
+      duplicateCandidatesBySize,
+    );
     if (child) topEntries.push(child);
   }
   // Only merge in /Applications for a real full-home scan — a scoped test
@@ -189,7 +283,14 @@ async function main() {
   // of /Applications every time.
   const includedApplications = resolvedRoot === homeDir;
   if (includedApplications) {
-    const applicationsEntry = await walk("/Applications", homeDir, scanDir, categoryTotals);
+    const applicationsEntry = await walk(
+      "/Applications",
+      homeDir,
+      scanDir,
+      categoryTotals,
+      reclaimCandidates,
+      duplicateCandidatesBySize,
+    );
     if (applicationsEntry) {
       // $HOME often has its own (usually near-empty) "Applications" folder
       // too — real, found via a live test: both would otherwise display
@@ -239,6 +340,13 @@ async function main() {
   const diskFreeBytes = volumeStats.bavail * volumeStats.bsize;
   const diskUsedBytes = diskTotalBytes - diskFreeBytes;
 
+  // Duplicate detection's actual hashing pass — only real candidates
+  // (same-size files, already grouped for free during the walk above),
+  // never the whole disk. See findDuplicateFlags() for why this can't
+  // run inline during the walk itself (needs cross-entry state).
+  const duplicateFlags = await findDuplicateFlags(duplicateCandidatesBySize);
+  const cleanupFlags = boundFlags([...reclaimCandidates, ...duplicateFlags]);
+
   console.log(`Scanned ${resolvedRoot}${includedApplications ? " + /Applications" : ""}`);
   console.log(`Total: ${gb(rootEntry.allocatedBytes)} GB in ${durationMs}ms (real disk usage)`);
   console.log(`Disk: ${gb(diskUsedBytes)} GB used of ${gb(diskTotalBytes)} GB total (${gb(diskFreeBytes)} GB free)`);
@@ -246,6 +354,7 @@ async function main() {
   for (const [cat, bytes] of Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])) {
     console.log(`  ${cat.padEnd(14)} ${gb(bytes)} GB`);
   }
+  console.log(`Cleanup flags: ${cleanupFlags.length} (of ${reclaimCandidates.length + duplicateFlags.length} found, bounded to largest)`);
 
   if (dryRun) {
     console.log("\n--dry-run: nothing written to data/");
@@ -255,7 +364,16 @@ async function main() {
   await writeFile(
     path.join(scanDir, "meta.json"),
     JSON.stringify(
-      { scannedAt, durationMs, root: rootEntry, categoryTotals, diskTotalBytes, diskUsedBytes, diskFreeBytes },
+      {
+        scannedAt,
+        durationMs,
+        root: rootEntry,
+        categoryTotals,
+        diskTotalBytes,
+        diskUsedBytes,
+        diskFreeBytes,
+        cleanupFlags,
+      },
       null,
       2,
     ) + "\n",
