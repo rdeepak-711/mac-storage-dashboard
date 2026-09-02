@@ -17,5 +17,42 @@ export function formatBytes(bytes: number): string {
 }
 
 export function categoryLabel(category: string): string {
-  return category.replace("-", " ");
+  return category
+    .split("-")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+/** Human-readable label per reclaim-rules.mjs ruleId, shown on flagged rows. */
+export function ruleLabel(ruleId: string): string {
+  const labels: Record<string, string> = {
+    "stale-node-modules": "Stale node_modules",
+    "xcode-derived-data": "Xcode Derived Data",
+    "old-downloads-installer": "Old installer in Downloads",
+    "stale-large-file": "Stale large file",
+    "duplicate-file": "Duplicate file",
+  };
+  return labels[ruleId] ?? ruleId;
+}
+
+/**
+ * Small glyph per category for row icons — same role as macOS Storage
+ * settings' own SF Symbols icons per row, just emoji since we don't ship
+ * icon assets. "reclaimable" gets a broom (cleanup semantics), "other" a
+ * generic folder — every other category maps to its closest real-world
+ * object.
+ */
+export function categoryIcon(category: string): string {
+  const icons: Record<string, string> = {
+    documents: "📄",
+    applications: "📦",
+    developer: "⌨️",
+    photos: "🖼️",
+    "system-data": "⚙️",
+    mail: "✉️",
+    music: "🎵",
+    reclaimable: "🧹",
+    other: "📁",
+  };
+  return icons[category] ?? "📁";
 }

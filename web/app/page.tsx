@@ -1,60 +1,87 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { layoutTreemap, type TreemapRect } from "@/lib/treemap";
-import { formatBytes, categoryLabel } from "@/lib/format";
-import type { Category, ScanSnapshot } from "@/lib/scan-types";
+import { useEffect, useMemo, useState } from "react";
+import { formatBytes } from "@/lib/format";
+import { mergeFlagsByPath, isPathProtected, type MergedFlag } from "@/lib/cleanup-flags";
+import { TreemapLevel } from "./TreemapLevel";
+import { ListLevel } from "./ListLevel";
+import type { Category, DisplayEntry, ProtectedPath, ScanSnapshot, StorageEntry } from "@/lib/scan-types";
 
 type Status = "loading" | "idle" | "scanning" | "error";
+type ViewMode = "treemap" | "list";
+type Mode = "browse" | "cleanup";
+type DeletePhase = "idle" | "confirming" | "deleting" | "done" | "error";
+
+interface FolderCrumb {
+  path: string;
+  name: string;
+}
+
+const ROOT: FolderCrumb = { path: "__root__", name: "Home" };
 
 /**
- * The real landing view — per spec.md FR-002, the top level is the
- * categorized breakdown (the same 9 buckets macOS Storage settings
- * shows), not a raw folder listing. Rewritten 2026-09-01: the first
- * version of this page rendered $HOME's individual top-level folders
- * instead, which was a real scope mismatch (Deepak caught it) — that
- * flat folder view now lives at /browse.
+ * Simplified 2026-09-01, same day as the first unification, after Deepak
+ * reviewed it and said plainly it wasn't understandable. Root cause: the
+ * 9-category top level lied about being consistent — clicking a tile led
+ * to three different kinds of screens (a real folder, a "this category is
+ * scattered" fallback, or the flagged list) with no way to predict which.
  *
- * Category tiles are deliberately NOT clickable yet — Documents-tagged
- * files, for example, are scattered across many real folders on disk;
- * showing "everything in category X" disk-wide is a real, separate
- * capability the scanner doesn't currently build (it would need its own
- * index), not something to bolt on silently here.
+ * Fixed by removing the category-navigation layer entirely. Two plain
+ * modes instead: Browse (real folders only, every click behaves
+ * identically — drill into a real folder, always) and Clean up (the
+ * flagged list, its own tab, not nested behind anything). Category is
+ * now only ever a color hint on a real entry (via lib/treemap.ts's
+ * categoryColor/cellColor), never something you click through. See
+ * .claude/plans/functional-enchanting-corbato.md for the full rationale.
+ *
+ * `selected` (and its size/name in `selectedDetails`) persists across
+ * navigation AND across the Browse/Clean up mode switch — a cart, not a
+ * per-level selection.
  */
 export default function Home() {
   const [scan, setScan] = useState<ScanSnapshot | null>(null);
-  const [categoryTotals, setCategoryTotals] = useState<Record<string, number> | null>(null);
+  const [protectedPaths, setProtectedPaths] = useState<ProtectedPath[]>([]);
   const [status, setStatus] = useState<Status>("loading");
+  const [viewMode, setViewMode] = useState<ViewMode>("treemap");
+  const [mode, setMode] = useState<Mode>("browse");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
-  const [size, setSize] = useState({ width: 0, height: 0 });
-  const [hoveredPath, setHoveredPath] = useState<string | null>(null);
-  const [cursor, setCursor] = useState({ x: 0, y: 0 });
-  const containerRef = useRef<HTMLDivElement>(null);
+
+  const [breadcrumb, setBreadcrumb] = useState<FolderCrumb[]>([ROOT]);
+  const [folderCache, setFolderCache] = useState<Map<string, StorageEntry[]>>(new Map());
+
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedDetails, setSelectedDetails] = useState<Map<string, { name: string; sizeBytes: number }>>(
+    new Map(),
+  );
+  const [phase, setPhase] = useState<DeletePhase>("idle");
+  const [deleteResult, setDeleteResult] = useState<{
+    deleted: { path: string; sizeBytes: number }[];
+    skipped: { path: string; reason: string }[];
+  } | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [protectingPath, setProtectingPath] = useState<string | null>(null);
+
+  // User Story 4 (P4) — additive only, never load-bearing. Candidates are
+  // whatever's currently selected in Browse mode and NOT already
+  // deterministically flagged (FR-016: only for items the rules didn't
+  // confidently flag). No separate whole-disk "ambiguous items" index —
+  // reuses the existing selection cart as the candidate source, kept
+  // deliberately simple for a P4 story per the constitution.
+  const [aiSuggestions, setAiSuggestions] = useState<{ path: string; rationale: string }[] | null>(null);
+  const [aiUnavailable, setAiUnavailable] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
-      const res = await fetch("/api/scan");
-      const data = await res.json();
-      if (data.scan) {
-        setScan(data.scan);
-        setCategoryTotals(data.scan.categoryTotals);
-      }
+      const [scanRes, protectedRes] = await Promise.all([fetch("/api/scan"), fetch("/api/protected-paths")]);
+      const scanData = await scanRes.json();
+      const protectedData = await protectedRes.json();
+      setScan(scanData.scan);
+      setProtectedPaths(protectedData.protected ?? []);
       setStatus("idle");
     })();
-  }, []);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const observer = new ResizeObserver((observedEntries) => {
-      for (const entry of observedEntries) {
-        setSize({ width: entry.contentRect.width, height: entry.contentRect.height });
-      }
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -72,7 +99,11 @@ export default function Home() {
       const meta = await res.json();
       if (!res.ok) throw new Error(meta.detail ?? meta.error ?? "scan failed");
       setScan(meta);
-      setCategoryTotals(meta.categoryTotals);
+      // A fresh scan invalidates cached folder listings — read from the
+      // previous scan's per-directory listing files, which may no longer
+      // match reality (files moved/deleted since).
+      setFolderCache(new Map());
+      setBreadcrumb([ROOT]);
       setStatus("idle");
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -80,88 +111,188 @@ export default function Home() {
     }
   }
 
-  const NOT_SCANNED_PATH = "not-scanned";
-
-  // Added 2026-09-01: real folders the scan couldn't read, almost always
-  // because whatever process ran the scanner doesn't have macOS's Full
-  // Disk Access grant — without it, real data (Mail, Messages, Photos,
-  // Safari...) silently reports as 0 bytes with no explanation. Showing
-  // a short, deduplicated, sorted sample of names (not all — restricted
-  // count can run into the hundreds once nested subfolders are counted)
-  // plus a direct link to the exact right Settings pane, so this becomes
-  // a guided fix instead of an invisible gap.
-  const restrictedNames = scan
-    ? [...new Set((scan.restrictedPaths ?? []).map((p) => p.name))].sort()
-    : [];
+  const restrictedNames = scan ? [...new Set((scan.restrictedPaths ?? []).map((p) => p.name))].sort() : [];
   const RESTRICTED_SAMPLE_SIZE = 6;
   const restrictedSample = restrictedNames.slice(0, RESTRICTED_SAMPLE_SIZE);
   const restrictedOverflow = restrictedNames.length - restrictedSample.length;
 
-  // Real categoryTotals (from the scanner, see data-model.md) turned into
-  // the same StorageEntry-like shape layoutTreemap already knows how to
-  // lay out — no separate rendering path needed for 9 items.
-  //
-  // Added 2026-09-01, per Deepak's request: a real "not scanned" segment
-  // — the gap between the real, whole-disk diskUsedBytes (fs.statfsSync)
-  // and what our own categories add up to. This is genuinely real data
-  // (a subtraction of two real numbers, not fabricated) and includes
-  // macOS itself plus root-level system folders we deliberately don't
-  // scan. Rendered as view-only — never selectable, never deletable —
-  // both because it's not a real scanned entry with a real path we could
-  // safely act on, and because this is exactly the kind of system space
-  // that should never be touched by a cleanup tool.
-  const categoryEntries =
-    categoryTotals
-      ? Object.entries(categoryTotals)
-          .filter(([, bytes]) => bytes > 0)
-          .map(([category, bytes]) => ({
-            path: `category:${category}`,
-            name: categoryLabel(category),
-            kind: "directory" as const,
-            sizeBytes: bytes,
-            allocatedBytes: bytes,
-            category: category as Category,
-            modifiedAt: scan?.scannedAt ?? new Date(0).toISOString(),
-            lastUsedAt: null,
-            flags: [],
-          }))
-      : [];
+  const flagsByPath: Map<string, MergedFlag> = useMemo(
+    () => mergeFlagsByPath(scan?.cleanupFlags ?? []),
+    [scan],
+  );
 
-  const scannedTotal = categoryEntries.reduce((sum, e) => sum + e.allocatedBytes, 0);
-  const notScannedBytes = scan ? Math.max(0, scan.diskUsedBytes - scannedTotal) : 0;
-  if (scan && notScannedBytes > 0) {
-    categoryEntries.push({
-      path: NOT_SCANNED_PATH,
-      name: "Not Scanned (System)",
-      kind: "directory" as const,
-      sizeBytes: notScannedBytes,
-      allocatedBytes: notScannedBytes,
-      category: "system-data" as Category,
+  // Real, whole-disk gap between diskUsedBytes and what the current
+  // folder listing accounts for isn't tracked per-folder — this is just
+  // the top-level note: macOS itself + root-level system folders this
+  // tool deliberately doesn't scan. A plain text line, not a fake tile.
+  const notScannedBytes = useMemo(() => {
+    if (!scan) return 0;
+    const rootEntries = folderCache.get(ROOT.path);
+    if (!rootEntries) return 0;
+    const rootTotal = rootEntries.reduce((sum, e) => sum + e.allocatedBytes, 0);
+    return Math.max(0, scan.diskUsedBytes - rootTotal);
+  }, [scan, folderCache]);
+
+  // Reclaimable isn't folder-shaped — its natural view is the flagged
+  // list, adapted into DisplayEntry shape (kind: "file" so it's never
+  // treated as drillable) so it can reuse ListLevel's row rendering.
+  // name is the full real path since there's no containing-folder
+  // breadcrumb context here to shorten it.
+  const reclaimableEntries: DisplayEntry[] = useMemo(() => {
+    if (!scan) return [];
+    return [...flagsByPath.values()].map((f) => ({
+      path: f.path,
+      name: f.path,
+      kind: "file",
+      sizeBytes: f.sizeBytes,
+      allocatedBytes: f.sizeBytes,
+      category: "reclaimable",
       modifiedAt: scan.scannedAt,
       lastUsedAt: null,
       flags: [],
+    }));
+  }, [scan, flagsByPath]);
+
+  const currentPath = breadcrumb[breadcrumb.length - 1].path;
+  const browseEntries: DisplayEntry[] | null = folderCache.get(currentPath) ?? null;
+  const currentEntries = mode === "cleanup" ? reclaimableEntries : browseEntries;
+
+  // Fetches to populate the folder cache when the current Browse path
+  // isn't cached yet — currentEntries above stays a pure derivation.
+  useEffect(() => {
+    if (mode !== "browse" || folderCache.has(currentPath)) return;
+    (async () => {
+      const res = await fetch(`/api/browse?path=${encodeURIComponent(currentPath)}`);
+      const data = await res.json();
+      setFolderCache((prev) => new Map(prev).set(currentPath, data.entries ?? []));
+    })();
+  }, [mode, currentPath, folderCache]);
+
+  function drillInto(entry: DisplayEntry) {
+    if (entry.kind === "directory") {
+      setBreadcrumb((prev) => [...prev, { path: entry.path, name: entry.name }]);
+    }
+  }
+
+  function toggleSelect(path: string, name: string, sizeBytes: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    setSelectedDetails((prev) => {
+      const next = new Map(prev);
+      if (next.has(path)) next.delete(path);
+      else next.set(path, { name, sizeBytes });
+      return next;
     });
   }
 
-  // noGroup: true — there are at most 9 fixed categories here, so every
-  // one of them should always show its own real name, never fold into a
-  // "3 more items" cell (that's for /browse, where there can genuinely be
-  // hundreds of real folders — see lib/treemap.ts).
-  const rects: TreemapRect[] =
-    categoryEntries.length > 0 && size.width > 0 && size.height > 0
-      ? layoutTreemap(categoryEntries, size.width, size.height, { noGroup: true })
-      : [];
+  function handleToggleFromLevel(path: string) {
+    const entry = currentEntries?.find((e) => e.path === path);
+    if (entry) toggleSelect(entry.path, entry.name, entry.allocatedBytes);
+  }
 
-  const hovered = rects.find((r) => r.path === hoveredPath) ?? null;
+  function selectAllVisible() {
+    if (!currentEntries) return;
+    for (const entry of currentEntries) {
+      if (isPathProtected(entry.path, protectedPaths)) continue;
+      if (!selected.has(entry.path)) toggleSelect(entry.path, entry.name, entry.allocatedBytes);
+    }
+  }
 
-  // Tooltip position, clamped so it never renders off the right/bottom
-  // edge of the treemap area. Added 2026-09-01: the footer-only hover
-  // feedback made the eye travel away from the hovered cell — this
-  // shows up right where you're already looking.
-  const tooltipWidth = 200;
-  const tooltipHeight = 52;
-  const tooltipX = Math.min(cursor.x + 16, Math.max(0, size.width - tooltipWidth - 8));
-  const tooltipY = Math.min(cursor.y + 16, Math.max(0, size.height - tooltipHeight - 8));
+  function clearSelection() {
+    setSelected(new Set());
+    setSelectedDetails(new Map());
+  }
+
+  // Persists to data/category-overrides.json (checked before the
+  // folder-name heuristics on the next scan — see scanner/categorize.mjs)
+  // and updates the currently-cached listing optimistically so the color
+  // change is visible immediately, not just after a rescan.
+  async function setCategory(path: string, category: Category) {
+    await fetch("/api/category-overrides", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, category }),
+    });
+    setFolderCache((prev) => {
+      const entries = prev.get(currentPath);
+      if (!entries) return prev;
+      const next = new Map(prev);
+      next.set(
+        currentPath,
+        entries.map((e) => (e.path === path ? { ...e, category } : e)),
+      );
+      return next;
+    });
+  }
+
+  async function getAiSuggestions() {
+    const candidatePaths = [...selected].filter((p) => !flagsByPath.has(p));
+    if (candidatePaths.length === 0) return;
+    setAiLoading(true);
+    setAiError(null);
+    setAiSuggestions(null);
+    setAiUnavailable(false);
+    try {
+      const res = await fetch("/api/ai-suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidatePaths }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "AI suggestion request failed");
+      if (data.unavailable) setAiUnavailable(true);
+      else setAiSuggestions(data.suggestions ?? []);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  async function protectPath(path: string) {
+    setProtectingPath(path);
+    try {
+      await fetch("/api/protected-paths", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      if (selected.has(path)) toggleSelect(path, "", 0);
+      const res = await fetch("/api/protected-paths");
+      const data = await res.json();
+      setProtectedPaths(data.protected ?? []);
+    } finally {
+      setProtectingPath(null);
+    }
+  }
+
+  const selectedTotal = [...selectedDetails.values()].reduce((sum, d) => sum + d.sizeBytes, 0);
+
+  async function confirmDelete() {
+    setPhase("deleting");
+    setDeleteError(null);
+    try {
+      const res = await fetch("/api/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: [...selected] }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "delete failed");
+      setDeleteResult({ deleted: data.deleted ?? [], skipped: data.skipped ?? [] });
+      clearSelection();
+      setPhase("done");
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : String(err));
+      setPhase("error");
+    }
+  }
+
+  const freedBytes = deleteResult?.deleted.reduce((sum, d) => sum + d.sizeBytes, 0) ?? 0;
 
   return (
     <div className="flex h-screen flex-col overflow-hidden">
@@ -177,17 +308,44 @@ export default function Home() {
             {scan && (
               <span className="text-xs text-[var(--text-secondary)]">
                 Scanned {new Date(scan.scannedAt).toLocaleString()}
+                {notScannedBytes > 0 && ` · ${formatBytes(notScannedBytes)} not scanned (macOS + system folders)`}
               </span>
             )}
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <Link
-            href="/browse"
-            className="text-sm text-[var(--text-secondary)] transition-colors hover:text-[var(--accent)]"
-          >
-            Browse by folder →
-          </Link>
+          <div className="flex rounded-md border border-[var(--border)] p-0.5 text-sm">
+            {(["browse", "cleanup"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={`rounded px-3 py-1 capitalize transition-colors ${
+                  mode === m
+                    ? "bg-[var(--border)] text-[var(--text-primary)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                {m === "browse" ? "Browse" : "Clean up"}
+              </button>
+            ))}
+          </div>
+          {mode === "browse" && (
+            <div className="flex rounded-md border border-[var(--border)] p-0.5 text-sm">
+              {(["treemap", "list"] as const).map((vmode) => (
+                <button
+                  key={vmode}
+                  onClick={() => setViewMode(vmode)}
+                  className={`rounded px-3 py-1 capitalize transition-colors ${
+                    viewMode === vmode
+                      ? "bg-[var(--border)] text-[var(--text-primary)]"
+                      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  {vmode}
+                </button>
+              ))}
+            </div>
+          )}
           <button
             onClick={runScan}
             disabled={status === "scanning"}
@@ -197,6 +355,26 @@ export default function Home() {
           </button>
         </div>
       </header>
+
+      {mode === "browse" && (
+        <div className="flex items-center gap-1 border-b border-[var(--border)] bg-[var(--surface)] px-6 py-2 text-sm">
+          {breadcrumb.map((crumb, i) => (
+            <span key={crumb.path} className="flex items-center gap-1">
+              {i > 0 && <span className="text-[var(--text-secondary)]">/</span>}
+              <button
+                onClick={() => setBreadcrumb(breadcrumb.slice(0, i + 1))}
+                className={
+                  i === breadcrumb.length - 1
+                    ? "text-[var(--text-primary)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--accent)]"
+                }
+              >
+                {crumb.name}
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
       {status === "error" && (
         <div className="border-b border-[var(--border)] bg-[var(--surface)] px-6 py-3 text-sm text-red-400">
@@ -224,14 +402,6 @@ export default function Home() {
               Open Full Disk Access settings →
             </a>
           </div>
-          {/*
-            Added 2026-09-01: Deepak pointed out the link above just opens
-            System Settings without saying WHAT to grant access to —
-            macOS's own dialog doesn't know or say which app is asking.
-            scannerHostApp is detected server-side by walking the real
-            process tree (scan.mjs's detectHostApp()), so we can actually
-            answer that instead of leaving it to guesswork.
-          */}
           <p>
             {scan?.scannerHostApp ? (
               <>
@@ -250,15 +420,7 @@ export default function Home() {
         </div>
       )}
 
-      <main
-        ref={containerRef}
-        className="relative flex-1 overflow-hidden"
-        onMouseLeave={() => setHoveredPath(null)}
-        onMouseMove={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          setCursor({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-        }}
-      >
+      <main className="relative flex-1 overflow-hidden">
         {status === "loading" && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
             Loading…
@@ -274,82 +436,230 @@ export default function Home() {
           </div>
         )}
 
-        {rects.map((r) => {
-          const isHovered = r.path === hoveredPath;
-          const isDimmed = hoveredPath !== null && !isHovered;
-          const isViewOnly = r.path === NOT_SCANNED_PATH;
-          return (
-            <div
-              key={r.path}
-              onMouseEnter={() => setHoveredPath(r.path)}
-              className="absolute box-border flex cursor-default flex-col justify-end overflow-hidden p-2 transition-all duration-150"
-              style={{
-                left: r.x,
-                top: r.y,
-                width: r.width,
-                height: r.height,
-                background: isViewOnly
-                  ? `repeating-linear-gradient(135deg, ${r.color}, ${r.color} 8px, var(--bg) 8px, var(--bg) 9px)`
-                  : r.color,
-                opacity: isDimmed ? 0.55 : 1,
-                boxShadow: isHovered ? "inset 0 0 0 2px var(--text-primary)" : undefined,
-                zIndex: isHovered ? 1 : 0,
-              }}
-            >
-              {r.width > 60 && r.height > 30 && (
-                <>
-                  <div className="flex items-start gap-1 text-sm font-semibold uppercase leading-tight tracking-wide text-[var(--bg)] [overflow-wrap:anywhere]">
-                    {isViewOnly && <span aria-hidden>🔒</span>}
-                    <span>{isViewOnly ? "System (not scanned)" : r.name}</span>
-                  </div>
-                  <div className="font-[family-name:var(--font-data)] text-xs text-[var(--bg)] opacity-80">
-                    {formatBytes(r.allocatedBytes)}
-                    {isViewOnly && " · view only"}
-                  </div>
-                </>
-              )}
-            </div>
-          );
-        })}
+        {status === "idle" && scan && currentEntries === null && (
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--text-secondary)]">
+            Loading…
+          </div>
+        )}
 
-        {hovered && (
-          <div
-            className="pointer-events-none absolute z-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 shadow-lg"
-            style={{ left: tooltipX, top: tooltipY, width: tooltipWidth }}
-          >
-            <div className="truncate text-sm font-semibold text-[var(--text-primary)]">
-              {hovered.path === NOT_SCANNED_PATH ? "System (not scanned)" : hovered.name}
-            </div>
-            <div className="font-[family-name:var(--font-data)] text-xs text-[var(--text-secondary)]">
-              {formatBytes(hovered.allocatedBytes)}
-              {hovered.path === NOT_SCANNED_PATH && " · view only"}
-            </div>
+        {status === "idle" && scan && currentEntries !== null && currentEntries.length === 0 && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
+            <p className="text-sm text-[var(--text-secondary)]">
+              {mode === "cleanup" ? "Nothing flagged as reclaimable in the latest scan." : "Nothing here."}
+            </p>
+          </div>
+        )}
+
+        {status === "idle" && scan && currentEntries !== null && currentEntries.length > 0 && (
+          <div className="absolute inset-0">
+            {mode === "cleanup" ? (
+              <ListLevel
+                entries={currentEntries}
+                flagsByPath={flagsByPath}
+                selected={selected}
+                protectedPaths={protectedPaths}
+                onToggleSelect={handleToggleFromLevel}
+                onDrillInto={() => {}}
+                onProtect={protectPath}
+                protectingPath={protectingPath}
+              />
+            ) : viewMode === "treemap" ? (
+              <TreemapLevel
+                entries={currentEntries}
+                flagsByPath={flagsByPath}
+                selected={selected}
+                protectedPaths={protectedPaths}
+                onToggleSelect={handleToggleFromLevel}
+                onDrillInto={drillInto}
+              />
+            ) : (
+              <ListLevel
+                entries={currentEntries}
+                flagsByPath={flagsByPath}
+                selected={selected}
+                protectedPaths={protectedPaths}
+                onToggleSelect={handleToggleFromLevel}
+                onDrillInto={drillInto}
+                onProtect={protectPath}
+                protectingPath={protectingPath}
+                onSetCategory={setCategory}
+              />
+            )}
           </div>
         )}
       </main>
 
-      <footer className="flex h-10 items-center border-t border-[var(--border)] bg-[var(--surface)] px-6 font-[family-name:var(--font-data)] text-xs">
-        {hovered ? (
-          hovered.path === NOT_SCANNED_PATH ? (
-            <div className="flex w-full items-center gap-3 text-[var(--text-primary)]">
-              <span className="truncate font-medium">🔒 System (not scanned)</span>
-              <span className="text-[var(--text-secondary)]">{formatBytes(hovered.allocatedBytes)}</span>
-              <span className="ml-auto truncate text-[var(--text-secondary)]">
-                Includes macOS itself and system-internal folders this tool deliberately doesn&apos;t scan — never selectable, never deletable.
+      {currentEntries !== null && currentEntries.length > 0 && (
+        <div className="flex items-center gap-3 border-t border-[var(--border)] bg-[var(--surface)] px-6 py-2 text-sm">
+          <button onClick={selectAllVisible} className="text-[var(--accent)] hover:underline">
+            Select all visible
+          </button>
+          {selected.size > 0 && (
+            <button onClick={clearSelection} className="text-[var(--text-secondary)] hover:underline">
+              Clear selection
+            </button>
+          )}
+          {mode === "browse" && [...selected].some((p) => !flagsByPath.has(p)) && (
+            <button onClick={getAiSuggestions} disabled={aiLoading} className="text-[var(--accent)] hover:underline disabled:opacity-50">
+              {aiLoading ? "Asking AI…" : "Ask AI about selected"}
+            </button>
+          )}
+        </div>
+      )}
+
+      {(aiSuggestions || aiUnavailable || aiError) && (
+        <div className="border-t border-[var(--border)] bg-[var(--surface)] px-6 py-3 text-sm">
+          <div className="mx-auto max-w-2xl">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wide text-[var(--accent)]">
+                AI Suggestions — worth a look, not a recommendation to delete
               </span>
+              <button
+                onClick={() => {
+                  setAiSuggestions(null);
+                  setAiUnavailable(false);
+                  setAiError(null);
+                }}
+                className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              >
+                Dismiss
+              </button>
             </div>
-          ) : (
-            <div className="flex w-full items-center gap-3 text-[var(--text-primary)]">
-              <span className="truncate font-medium">{hovered.name}</span>
-              <span className="text-[var(--text-secondary)]">{formatBytes(hovered.allocatedBytes)}</span>
+            {aiUnavailable && (
+              <p className="text-xs text-[var(--text-secondary)]">
+                AI suggestions aren&apos;t available (no Anthropic API key configured) — everything else here still
+                works normally.
+              </p>
+            )}
+            {aiError && <p className="text-xs text-red-400">AI suggestion request failed: {aiError}</p>}
+            {aiSuggestions?.length === 0 && (
+              <p className="text-xs text-[var(--text-secondary)]">No suggestions for the selected items.</p>
+            )}
+            {aiSuggestions && aiSuggestions.length > 0 && (
+              <ul className="space-y-2">
+                {aiSuggestions.map((s) => (
+                  <li key={s.path} className="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+                    <div className="truncate font-[family-name:var(--font-data)] text-xs text-[var(--text-primary)]">
+                      {s.path}
+                    </div>
+                    <div className="mt-0.5 text-xs text-[var(--text-secondary)]">{s.rationale}</div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+
+      {selected.size > 0 && phase === "idle" && (
+        <div className="sticky bottom-0 border-t border-[var(--border)] bg-[var(--surface)] px-6 py-4">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-[var(--text-primary)]">
+              {selected.size} item{selected.size === 1 ? "" : "s"} selected · {formatBytes(selectedTotal)}
+            </span>
+            <button
+              onClick={() => setPhase("confirming")}
+              className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--bg)] transition-opacity hover:opacity-90"
+            >
+              Delete selected…
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase === "confirming" && (
+        <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/60 px-6">
+          <div className="max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6">
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">
+              Move {selected.size} item{selected.size === 1 ? "" : "s"} to Trash?
+            </h2>
+            <p className="mt-1 text-sm text-[var(--text-secondary)]">
+              Total:{" "}
+              <span className="font-[family-name:var(--font-data)] text-[var(--text-primary)]">
+                {formatBytes(selectedTotal)}
+              </span>
+              . Moved to Trash, not permanently deleted — recoverable until you empty it yourself.
+            </p>
+            <ul className="mt-4 max-h-64 space-y-1 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 font-[family-name:var(--font-data)] text-xs text-[var(--text-secondary)]">
+              {[...selectedDetails.entries()].map(([path, d]) => (
+                <li key={path} className="flex justify-between gap-3">
+                  <span className="truncate">{path}</span>
+                  <span className="shrink-0">{formatBytes(d.sizeBytes)}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                onClick={() => setPhase("idle")}
+                className="rounded-md border border-[var(--border)] px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--bg)] hover:opacity-90"
+              >
+                Move to Trash
+              </button>
             </div>
-          )
-        ) : (
-          <span className="text-[var(--text-secondary)]">
-            {rects.length > 0 ? "hover any category for its total — click \"Browse by folder\" to see real files" : ""}
-          </span>
-        )}
-      </footer>
+          </div>
+        </div>
+      )}
+
+      {phase === "deleting" && (
+        <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/60">
+          <p className="text-sm text-[var(--text-secondary)]">Moving to Trash…</p>
+        </div>
+      )}
+
+      {phase === "error" && (
+        <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/60 px-6">
+          <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6">
+            <p className="text-sm text-red-400">Delete failed: {deleteError}</p>
+            <button
+              onClick={() => setPhase("idle")}
+              className="mt-4 rounded-md border border-[var(--border)] px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase === "done" && deleteResult && (
+        <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/60 px-6">
+          <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6">
+            <h2 className="text-lg font-semibold text-[var(--text-primary)]">Freed {formatBytes(freedBytes)}</h2>
+            <p className="mt-1 text-sm text-[var(--text-secondary)]">
+              {deleteResult.deleted.length} item{deleteResult.deleted.length === 1 ? "" : "s"} moved to Trash.
+              {deleteResult.skipped.length > 0 && ` ${deleteResult.skipped.length} skipped.`}
+            </p>
+            {deleteResult.skipped.length > 0 && (
+              <ul className="mt-3 space-y-1 text-xs text-[var(--text-secondary)]">
+                {deleteResult.skipped.map((s) => (
+                  <li key={s.path}>
+                    {s.path} — {s.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="mt-4 text-xs text-[var(--text-secondary)]">
+              Run a fresh scan to see the freed space reflected in the totals.
+            </p>
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={() => {
+                  setPhase("idle");
+                  setDeleteResult(null);
+                }}
+                className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--bg)] hover:opacity-90"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

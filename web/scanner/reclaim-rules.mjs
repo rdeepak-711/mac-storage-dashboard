@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * Deterministic reclaim rules — pure per-entry evaluation, no fs access,
@@ -91,6 +92,12 @@ export function evaluateEntry(entry, { now = new Date(), staleDays = DEFAULT_STA
  * Keeps only the largest MAX_FLAGS flags (by the entry's allocatedBytes,
  * passed alongside) — bounds meta.json size and keeps the Cleanup view
  * to a scannable list instead of every stale node_modules on the disk.
+ *
+ * sizeBytes is kept on the returned flag (not just used for sorting then
+ * discarded) — added 2026-09-01: the Cleanup UI's pre-delete confirmation
+ * (FR-008) must show the total size before anything is removed, and this
+ * is the one place that size was already known and about to be thrown
+ * away. See data-model.md's Cleanup Flag section.
  */
 export function boundFlags(flagsWithSize) {
   return flagsWithSize
@@ -101,13 +108,22 @@ export function boundFlags(flagsWithSize) {
       ruleId: flagWithSize.ruleId,
       reason: flagWithSize.reason,
       confidence: flagWithSize.confidence,
+      sizeBytes: flagWithSize.allocatedBytes,
       ...(flagWithSize.duplicateOf ? { duplicateOf: flagWithSize.duplicateOf } : {}),
     }));
 }
 
 // CLI entry point — reads an already-computed scan's cleanupFlags and
 // prints them. Does NOT re-walk the disk (see file header for why).
-if (import.meta.url === `file://${process.argv[1]}`) {
+// fileURLToPath + path.resolve, not a raw string compare — a bare
+// `import.meta.url === \`file://${process.argv[1]}\`` silently never
+// matches on a path containing a space (this project lives under a
+// Google Drive-mounted "My Drive" folder): import.meta.url percent-
+// encodes the space, process.argv[1] doesn't. Found real 2026-09-02 via
+// scheduled-check.mjs's identical bug — confirmed this CLI entry point
+// was silently dead the same way (`node scanner/reclaim-rules.mjs`
+// produced zero output instead of even the usage error).
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const args = process.argv.slice(2);
   const scanFlagIndex = args.indexOf("--scan");
   const metaPath = scanFlagIndex >= 0 ? args[scanFlagIndex + 1] : null;

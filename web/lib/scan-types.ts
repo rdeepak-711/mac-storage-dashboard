@@ -33,6 +33,15 @@ export interface StorageEntry {
   children?: StorageEntry[];
 }
 
+/**
+ * Alias used by TreemapLevel/ListLevel/app/page.tsx — every DisplayEntry
+ * is a real, individually-deletable filesystem path (or, for the Clean
+ * up tab, a real flagged path adapted into this shape). No synthetic
+ * "view only" entries exist since the 2026-09-01 category-navigation
+ * removal — see .claude/plans/functional-enchanting-corbato.md.
+ */
+export type DisplayEntry = StorageEntry;
+
 export interface ScanSnapshot {
   scannedAt: string;
   durationMs: number;
@@ -77,6 +86,8 @@ export interface CleanupFlag {
   ruleId: string;
   reason: string;
   confidence: CleanupConfidence;
+  /** allocatedBytes at scan time — kept (not stripped) so the Cleanup view's pre-delete total (FR-008) doesn't need a second lookup. */
+  sizeBytes: number;
   /** Only set for ruleId "duplicate-file": the path of the copy being kept. */
   duplicateOf?: string;
 }

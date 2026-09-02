@@ -7,6 +7,7 @@ import path from "node:path";
 import { categorize } from "./categorize.mjs";
 import { evaluateEntry, boundFlags, DUPLICATE_CANDIDATE_MIN_BYTES } from "./reclaim-rules.mjs";
 import { appendIndexEntry, pruneOldScans, listingFilename, SCANS_DIR } from "../lib/run-index.mjs";
+import { readCategoryOverrides } from "../lib/category-overrides.mjs";
 
 /**
  * Walks up the real process tree (via `ps`, macOS-only) from this
@@ -103,7 +104,7 @@ const visitedInodes = new Set();
  * here lets meta.json report "N folders couldn't be read" so the UI can
  * tell the user this is fixable, instead of a number that's just wrong.
  */
-async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates, duplicateCandidatesBySize, restrictedPaths) {
+async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates, duplicateCandidatesBySize, restrictedPaths, overrides) {
   let stat;
   try {
     stat = await lstat(absPath);
@@ -112,7 +113,7 @@ async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates
   }
 
   const name = path.basename(absPath) || absPath;
-  const category = categorize(absPath, homeDir);
+  const category = categorize(absPath, homeDir, overrides);
   const flags = [];
 
   if (stat.nlink > 1) {
@@ -181,6 +182,7 @@ async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates
       reclaimCandidates,
       duplicateCandidatesBySize,
       restrictedPaths,
+      overrides,
     );
     if (child) children.push(child);
   }
@@ -298,6 +300,7 @@ async function main() {
   const reclaimCandidates = [];
   const duplicateCandidatesBySize = new Map();
   const restrictedPaths = [];
+  const overrides = await readCategoryOverrides();
   const start = Date.now();
 
   // The dashboard's root is synthetic, not a single real filesystem path:
@@ -324,6 +327,7 @@ async function main() {
       reclaimCandidates,
       duplicateCandidatesBySize,
       restrictedPaths,
+      overrides,
     );
     if (child) topEntries.push(child);
   }
@@ -340,6 +344,7 @@ async function main() {
       reclaimCandidates,
       duplicateCandidatesBySize,
       restrictedPaths,
+      overrides,
     );
     if (applicationsEntry) {
       // $HOME often has its own (usually near-empty) "Applications" folder

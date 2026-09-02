@@ -1,4 +1,5 @@
 import path from "node:path";
+import { findOverrideCategory } from "../lib/category-overrides.mjs";
 
 /**
  * Maps an absolute path to one of the 9 Category ids from
@@ -48,13 +49,24 @@ function categorizeBySegments(segments) {
   return "other";
 }
 
-export function categorize(absolutePath, homeDir = process.env.HOME ?? "") {
+export function categorize(absolutePath, homeDir = process.env.HOME ?? "", overrides = []) {
   const allSegments = absolutePath.split(path.sep);
 
   // Check every path segment, not just the basename — a reclaimable
   // directory's own contents (e.g. everything under .../DerivedData/App-abc)
   // must inherit the same category as the directory itself.
   if (allSegments.some((seg) => RECLAIMABLE_BASENAMES.has(seg))) return "reclaimable";
+
+  // A user-fixed category (data/category-overrides.json) wins over every
+  // heuristic below — added 2026-09-01 after real data showed the
+  // heuristics failing for 93% of Deepak's real top-level folders (none
+  // named `Developer`/`Projects`/`code`, the only names the rules below
+  // recognize). Checked after reclaimable (a safety-relevant signal tied
+  // to the cleanup rules, not just cosmetic) but before everything else.
+  if (overrides.length > 0) {
+    const override = findOverrideCategory(absolutePath, overrides);
+    if (override) return override;
+  }
 
   // Applications can live at the top level ("/Applications/Safari.app")
   // as well as under $HOME ("~/Applications/...") — check before anything

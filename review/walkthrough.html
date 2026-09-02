@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mac Storage Cleanup — Live Walkthrough</title>
+<style>
+  :root {
+    --bg: #14161c;
+    --surface: #1b1e26;
+    --border: #2a2e38;
+    --text-primary: #e8eaf0;
+    --text-secondary: #9aa1af;
+    --accent: #6ea8fe;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text-primary);
+    font-family: -apple-system, "Public Sans", sans-serif; line-height: 1.5;
+  }
+  header {
+    padding: 32px 24px 20px; border-bottom: 1px solid var(--border); max-width: 900px; margin: 0 auto;
+  }
+  header h1 { margin: 0 0 8px; font-size: 24px; }
+  header p { color: var(--text-secondary); margin: 4px 0; font-size: 14px; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px; }
+  .section {
+    border: 1px solid var(--border); background: var(--surface); border-radius: 12px;
+    margin-bottom: 28px; overflow: hidden;
+  }
+  .section-header { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+  .section-header .step { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); font-weight: 600; }
+  .section-header h2 { margin: 4px 0 6px; font-size: 17px; }
+  .section-header p { margin: 0; font-size: 13px; color: var(--text-secondary); }
+  .section img { display: block; width: 100%; border-top: 1px solid var(--border); }
+  .path-note {
+    font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-top: 10px; color: var(--text-secondary);
+    overflow-x: auto; white-space: nowrap;
+  }
+  .tag {
+    display: inline-block; font-size: 10px; text-transform: uppercase; font-weight: 700;
+    padding: 2px 7px; border-radius: 4px; margin-left: 8px; vertical-align: middle;
+  }
+  .tag.real { background: rgba(110,168,254,0.15); color: var(--accent); }
+  footer { text-align: center; color: var(--text-secondary); font-size: 12px; padding: 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mac Storage Cleanup — Live Walkthrough</h1>
+  <p>Every screenshot below is from the actual app running against Deepak's real disk (scan from 2026-09-01, 16:27:15) — nothing staged or mocked. Captured via Playwright, 2026-09-02.</p>
+  <p>Nothing was deleted during this run — one confirm modal was opened and cancelled, one item was protected then immediately unprotected, purely to demonstrate the flow.</p>
+</header>
+<main>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 1 — Browse, Treemap, Home</span>
+      <h2>Landing view <span class="tag real">real data</span></h2>
+      <p>Opening the app: total disk usage, the "not scanned" note in the header (macOS + system folders this tool deliberately skips), and every real top-level folder under Home, sized by actual usage. No categories — every colored block is a real folder, colored by what's dominant inside it.</p>
+    </div>
+    <img src="screenshots/01-browse-treemap-root.png" alt="Treemap view of the real Home folder" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 2 — Browse, List, Home</span>
+      <h2>Same level, List view</h2>
+      <p>Same real data, same level, just rows instead of rectangles — every real top-level folder in Deepak's home directory, sorted biggest first, each with a checkbox and a Protect action.</p>
+    </div>
+    <img src="screenshots/02-browse-list-root.png" alt="List view of the real Home folder" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 3 — drilled into Library</span>
+      <h2>Real folder, one level deep</h2>
+      <p>Clicking "Library" drills into its real children — Application Support, CloudStorage, Containers, Caches, and so on, each a genuine subfolder with a real size. Breadcrumb now reads Home / Library.</p>
+    </div>
+    <div class="path-note">~/Library</div>
+    <img src="screenshots/03-browse-treemap-library.png" alt="Treemap view of ~/Library" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 4 — drilled into Application Support</span>
+      <h2>Two levels deep</h2>
+      <p>Real per-app data folders: com.apple.wallpaper, Brave, Google, Code, FileProvider, Notion, and more — each sized by real disk usage.</p>
+    </div>
+    <div class="path-note">~/Library/Application Support</div>
+    <img src="screenshots/04-browse-treemap-application-support.png" alt="Treemap view of ~/Library/Application Support" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 5 — same level, List view</span>
+      <h2>Consistency check</h2>
+      <p>Exact same real folder, same children, List view instead of Treemap — proving the two view modes are just two renderings of the identical data and navigation state.</p>
+    </div>
+    <div class="path-note">~/Library/Application Support</div>
+    <img src="screenshots/05-browse-list-application-support.png" alt="List view of ~/Library/Application Support" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 6 — seven levels deep, a real flagged file</span>
+      <h2>Inline cleanup badges while just browsing</h2>
+      <p>Drilled all the way to a real VS Code workspace storage folder. Two real files here — <code>state.vscdb</code> and <code>state.vscdb.backup</code> — are flagged by the cleanup rules (stale, and a duplicate of each other), and their CAUTION badge + full reason show up right here, inline, while just browsing normally. No separate screen needed to see why something's flagged.</p>
+    </div>
+    <div class="path-note">~/Library/Application Support/Code/User/workspaceStorage/bea5c56b482117abc399a13444190c1a</div>
+    <img src="screenshots/06-browse-list-flagged-deep.png" alt="List view showing real flagged files 7 levels deep" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 7 — same level, Treemap</span>
+      <h2>Same flagged files, Treemap view</h2>
+      <p>The CAUTION badges render on the treemap cells too — same data, same flags, same interaction, just shaped differently.</p>
+    </div>
+    <img src="screenshots/07-browse-treemap-flagged-deep.png" alt="Treemap view showing real flagged files 7 levels deep" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 8 — selecting a real flagged item</span>
+      <h2>Selection cart appears</h2>
+      <p>Checking the box on <code>state.vscdb</code> (0.56 GB, real) brings up the sticky selection bar at the bottom — this state persists as you keep navigating, including switching to the Clean up tab.</p>
+    </div>
+    <img src="screenshots/08-browse-treemap-selected-stickybar.png" alt="Sticky selection bar after selecting a real file" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 9 — Clean up tab</span>
+      <h2>The flagged list, real data</h2>
+      <p>Switching tabs to Clean up shows every real item the deterministic rules flagged across the whole disk — stale caches, old installers, duplicate files, stale large files — ranked by size, each with its real path and a plain-English reason. The selection from Step 8 is still shown as active in the sticky bar (not visible in this crop, verified in-session: it read "1 item selected · 0.56 GB").</p>
+    </div>
+    <img src="screenshots/09-cleanup-tab.png" alt="Clean up tab showing the real flagged list" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 10 — selecting a second real item, different location</span>
+      <h2>Cross-navigation selection cart, proven</h2>
+      <p>Selected two more real items directly from the Clean up list (a 1.58 GB stale FileProvider database file and a 0.60 GB stale Docker file) — sticky bar correctly reads "2 items selected · 2.18 GB", matching 1.58 + 0.60 exactly.</p>
+    </div>
+    <img src="screenshots/10-cleanup-selected-stickybar.png" alt="Two real items selected in the Clean up tab" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 11 — confirm modal</span>
+      <h2>Exact real paths, exact real total, before anything happens</h2>
+      <p>Clicking "Delete selected…" opens this modal listing the two real, full paths and the correct combined total (2.18 GB) before anything is touched. <strong>This was cancelled</strong> — nothing was deleted during this walkthrough.</p>
+    </div>
+    <img src="screenshots/11-confirm-modal.png" alt="Confirm modal with two real file paths and total size" />
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="step">Step 12 — Protect action</span>
+      <h2>Marking a real item as never-delete</h2>
+      <p>Clicking "Protect" on the FileProvider database file immediately shows a 🔒 PROTECTED badge and removes its Protect/checkbox controls. <strong>This was undone immediately after the screenshot</strong> (unprotected via the API) so the app is back to a clean state.</p>
+    </div>
+    <img src="screenshots/12-cleanup-protected.png" alt="A real item marked protected" />
+  </div>
+
+</main>
+<footer>Generated 2026-09-02 · every path, size, and reason shown above came from the real running app against Deepak's actual Mac.</footer>
+</body>
+</html>

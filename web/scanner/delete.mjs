@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { lstat, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import trash from "trash";
 import { appendIndexEntry, DELETES_DIR } from "../lib/run-index.mjs";
 import { readProtectedPaths, isProtected } from "../lib/protected-paths.mjs";
@@ -40,6 +41,39 @@ function isWithinBoundary(absPath, homeDir) {
 }
 
 /**
+ * Real recursive allocated size in bytes. `lstat(dir).blocks` — the
+ * shortcut used everywhere else in this file — only reflects a
+ * directory's OWN inode/metadata footprint, not what's inside it; using
+ * it directly for a directory silently logged every directory deletion
+ * as `sizeBytes: 0` (found 2026-09-02 via a real delete through the live
+ * UI: deleting a real 298MB `node_modules` folder logged 0 bytes freed).
+ * Files still take the cheap, correct `stat.blocks` path — only
+ * directories need the walk.
+ */
+async function recursiveAllocatedBytes(absPath, stat) {
+  if (!stat.isDirectory()) return stat.blocks * 512;
+
+  let total = stat.blocks * 512;
+  let dirents;
+  try {
+    dirents = await readdir(absPath, { withFileTypes: true });
+  } catch {
+    return total; // unreadable child listing — best-effort, not a hard failure here
+  }
+  for (const dirent of dirents) {
+    const childPath = path.join(absPath, dirent.name);
+    let childStat;
+    try {
+      childStat = await lstat(childPath);
+    } catch {
+      continue; // vanished mid-walk — skip, don't fail the whole size computation
+    }
+    total += await recursiveAllocatedBytes(childPath, childStat);
+  }
+  return total;
+}
+
+/**
  * requestedPaths: string[] — real absolute (or resolvable) filesystem
  * paths, matching contracts/api.md's POST /api/delete request body.
  *
@@ -76,7 +110,7 @@ export async function deletePaths(requestedPaths, { homeDir = process.env.HOME, 
       continue;
     }
 
-    const sizeBytes = stat.blocks * 512; // allocatedBytes — matches the scanner's convention
+    const sizeBytes = await recursiveAllocatedBytes(absPath, stat); // real recursive allocatedBytes — see the note above
 
     try {
       await trash(absPath);
@@ -126,7 +160,9 @@ export async function deletePaths(requestedPaths, { homeDir = process.env.HOME, 
 // files ONLY. Requires --yes so a bare `node scanner/delete.mjs <path>`
 // (e.g. run by habit, or with tab-completion picking the wrong path)
 // previews instead of acting.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// See reclaim-rules.mjs's identical fix for why this can't be a raw
+// string compare on a Drive-mounted (space-containing) path.
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const args = process.argv.slice(2);
   const confirmed = args.includes("--yes");
   const paths = args.filter((a) => a !== "--yes");

@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mac Storage Cleanup — Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: oklch(0.16 0.015 250);
+    --surface: oklch(0.205 0.015 250);
+    --border: oklch(0.28 0.015 250);
+    --text-primary: oklch(0.92 0.01 250);
+    --text-secondary: oklch(0.65 0.015 250);
+    --accent: oklch(0.72 0.13 250);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text-primary);
+    font-family: "Public Sans", -apple-system, sans-serif;
+  }
+  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  #app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border); padding: 20px 24px;
+  }
+  .disk-total { display: flex; align-items: baseline; gap: 12px; }
+  .disk-total .num { font-family: "JetBrains Mono", monospace; font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
+  .disk-total .meta { display: flex; flex-direction: column; }
+  .disk-total .meta span:first-child { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
+  .disk-total .meta span:last-child { font-size: 11px; color: var(--text-secondary); }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .toggle { display: flex; border: 1px solid var(--border); border-radius: 6px; padding: 2px; font-size: 14px; }
+  .toggle button {
+    border: none; background: none; color: var(--text-secondary);
+    padding: 4px 12px; border-radius: 4px; cursor: pointer; text-transform: capitalize;
+    font-family: inherit; font-size: 14px;
+  }
+  .toggle button.active { background: var(--border); color: var(--text-primary); }
+  .toggle button:hover:not(.active) { color: var(--text-primary); }
+  button.refresh {
+    border: 1px solid var(--border); background: var(--surface); color: var(--text-primary);
+    padding: 8px 16px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer;
+    font-family: inherit;
+  }
+  button.refresh:hover { border-color: var(--accent); color: var(--accent); }
+
+  .breadcrumb {
+    display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--border);
+    background: var(--surface); padding: 8px 24px; font-size: 14px;
+  }
+  .breadcrumb button {
+    border: none; background: none; color: var(--text-secondary); cursor: pointer;
+    font-family: inherit; font-size: 14px; padding: 0;
+  }
+  .breadcrumb button.current { color: var(--text-primary); cursor: default; }
+  .breadcrumb button:hover:not(.current) { color: var(--accent); }
+  .breadcrumb .sep { color: var(--text-secondary); }
+
+  .banner {
+    border-bottom: 1px solid var(--border); background: var(--surface);
+    padding: 8px 24px; font-size: 12px; color: var(--text-secondary);
+  }
+
+  main { position: relative; flex: 1; overflow: hidden; }
+
+  /* Treemap */
+  .treemap { position: absolute; inset: 0; display: flex; flex-wrap: wrap; align-content: stretch; }
+  .cell {
+    position: relative; display: flex; flex-direction: column; justify-content: flex-end;
+    padding: 8px; overflow: hidden; cursor: pointer; border: 1px solid var(--bg);
+    transition: filter 0.15s;
+  }
+  .cell:hover { filter: brightness(1.08); }
+  .cell.view-only { cursor: default; }
+  .cell .name { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: var(--bg); word-break: break-word; }
+  .cell .size { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--bg); opacity: 0.8; }
+  .cell .cb { position: absolute; top: 8px; left: 8px; }
+  .cell .badge { position: absolute; top: 8px; right: 8px; font-size: 9px; font-weight: 700; text-transform: uppercase; padding: 2px 5px; border-radius: 3px; }
+  .badge.safe { background: rgba(0,0,0,0.35); color: #b6f0c9; }
+  .badge.caution { background: rgba(0,0,0,0.35); color: #ffd9a0; }
+
+  /* List */
+  .list-wrap { position: absolute; inset: 0; overflow-y: auto; }
+  .list-inner { max-width: 720px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  .usage-card { border: 1px solid var(--border); background: var(--surface); border-radius: 16px; padding: 20px; }
+  .usage-card .row { display: flex; justify-content: space-between; align-items: baseline; }
+  .usage-card .row .name { font-size: 14px; font-weight: 600; }
+  .usage-card .row .val { font-family: "JetBrains Mono", monospace; font-size: 14px; color: var(--text-secondary); }
+  .usage-bar { display: flex; height: 12px; border-radius: 999px; overflow: hidden; gap: 2px; margin: 16px 0 12px; }
+  .usage-bar > span { display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  .legend .item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .legend .dot { width: 8px; height: 8px; border-radius: 999px; }
+
+  .rows-card { border: 1px solid var(--border); background: var(--surface); border-radius: 16px; overflow: hidden; }
+  .item-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--border); }
+  .item-row:first-child { border-top: none; }
+  .item-row .icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+  .item-row .body { flex: 1; min-width: 0; }
+  .item-row .body .name-line { display: flex; align-items: center; gap: 8px; }
+  .item-row .name-line .name { font-size: 14px; word-break: break-all; }
+  .item-row .reason { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+  .item-row .right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+  .item-row .right .size { font-family: "JetBrains Mono", monospace; font-size: 14px; }
+  .item-row .right button { border: none; background: none; color: var(--text-secondary); font-size: 12px; cursor: pointer; padding: 0; font-family: inherit; }
+  .item-row .right button:hover { color: var(--accent); }
+  .tag { font-size: 10px; text-transform: uppercase; padding: 2px 6px; border-radius: 3px; font-weight: 600; }
+  .tag.safe { background: color-mix(in oklch, oklch(0.64 0.13 145) 25%, var(--bg)); color: oklch(0.8 0.13 145); }
+  .tag.caution { background: color-mix(in oklch, oklch(0.64 0.15 60) 25%, var(--bg)); color: oklch(0.8 0.15 60); }
+  .tag.protected { background: var(--border); color: var(--text-secondary); }
+
+  .selectbar {
+    border-top: 1px solid var(--border); background: var(--surface); padding: 8px 24px;
+    display: flex; align-items: center; gap: 16px; font-size: 14px;
+  }
+  .selectbar a, .selectbar .link { color: var(--accent); cursor: pointer; text-decoration: none; }
+  .selectbar .clear { color: var(--text-secondary); cursor: pointer; }
+
+  .stickybar { border-top: 1px solid var(--border); background: var(--surface); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .stickybar button {
+    border: none; background: var(--accent); color: var(--bg); font-weight: 500; font-size: 14px;
+    padding: 8px 16px; border-radius: 6px; cursor: pointer; font-family: inherit;
+  }
+  .stickybar button:hover { opacity: 0.9; }
+
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 20; padding: 24px; }
+  .modal { width: 100%; max-width: 480px; max-height: 80vh; overflow-y: auto; border: 1px solid var(--border); background: var(--surface); border-radius: 16px; padding: 24px; }
+  .modal h2 { margin: 0 0 4px; font-size: 18px; }
+  .modal p { font-size: 14px; color: var(--text-secondary); margin: 4px 0; }
+  .modal ul { list-style: none; margin: 16px 0; padding: 12px; border: 1px solid var(--border); background: var(--bg); border-radius: 6px; max-height: 240px; overflow-y: auto; font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--text-secondary); }
+  .modal li { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .modal li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
+  .btn-outline { border: 1px solid var(--border); background: none; color: var(--text-secondary); padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; font-family: inherit; }
+  .btn-outline:hover { color: var(--text-primary); }
+  .btn-solid { border: none; background: var(--accent); color: var(--bg); padding: 8px 16px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; font-family: inherit; }
+  .btn-solid:hover { opacity: 0.9; }
+
+  .empty-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 8px; padding: 0 24px; color: var(--text-secondary); font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ── Sample data — mirrors real numbers captured live 2026-09-01 ──
+   This is a demo: static/hardcoded data, delete is simulated, not real. */
+
+const COLORS = {
+  documents: "oklch(0.64 0.14 25)",
+  applications: "oklch(0.64 0.13 145)",
+  developer: "oklch(0.64 0.13 250)",
+  photos: "oklch(0.64 0.13 330)",
+  "system-data": "oklch(0.5 0.055 255)",
+  mail: "oklch(0.64 0.12 200)",
+  music: "oklch(0.64 0.13 300)",
+  reclaimable: "oklch(0.64 0.15 60)",
+  other: "oklch(0.46 0.045 70)",
+};
+const ICONS = { documents:"📄", applications:"📦", developer:"⌨️", photos:"🖼️", "system-data":"⚙️", mail:"✉️", music:"🎵", reclaimable:"🧹", other:"📁" };
+
+const GB = 1_000_000_000, MB = 1_000_000, KB = 1_000;
+function fmt(b) {
+  if (b >= 0.01*GB) return (b/GB).toFixed(2) + " GB";
+  if (b >= MB) return (b/MB).toFixed(1) + " MB";
+  if (b >= KB) return Math.round(b/KB) + " KB";
+  return b + " B";
+}
+function title(s) { return s.split("-").map(w => w[0].toUpperCase()+w.slice(1)).join(" "); }
+
+// path -> item, drives every level. "children" = real folder contents.
+// "flag" = {conf, reason}. "viewOnly" = System(not scanned) tile.
+const TREE = {
+  "categories": {
+    label: "Categories",
+    diskUsed: 212_760_000_000, diskTotal: 245_110_000_000,
+    items: [
+      { path: "cat:system-data", name: "System Data", category: "system-data", size: 57_220_000_000, kind: "dir", goto: null },
+      { path: "cat:other", name: "Other", category: "other", size: 36_840_000_000, kind: "dir", goto: "fallback:other" },
+      { path: "cat:reclaimable", name: "Reclaimable", category: "reclaimable", size: 21_950_000_000, kind: "dir", goto: "reclaimable" },
+      { path: "cat:developer", name: "Developer", category: "developer", size: 19_650_000_000, kind: "dir", goto: "fallback:developer" },
+      { path: "cat:applications", name: "Applications", category: "applications", size: 10_730_000_000, kind: "dir", goto: null },
+      { path: "cat:documents", name: "Documents", category: "documents", size: 3_400_000, kind: "dir", goto: null },
+      { path: "cat:mail", name: "Mail", category: "mail", size: 50_000_000, kind: "dir", goto: null },
+      { path: "cat:music", name: "Music", category: "music", size: 1_500_000, kind: "dir", goto: null },
+      { path: "cat:photos", name: "Photos", category: "photos", size: 940_000_000, kind: "dir", goto: null },
+      { path: "not-scanned", name: "System (not scanned)", category: "system-data", size: 65_370_000_000, kind: "dir", viewOnly: true },
+    ],
+  },
+  "fallback:developer": {
+    label: "Developer", fallbackNote: "Developer isn't in one place — its contents are scattered across many real folders, not concentrated in a top-level one. Showing everything at the top level instead.",
+    items: [
+      { path: "~/Library", name: "Library", category: "system-data", size: 86_950_000_000, kind: "dir", goto: null },
+      { path: "~/.cache", name: ".cache", category: "other", size: 12_550_000_000, kind: "dir", goto: null },
+      { path: "~/.npm", name: ".npm", category: "other", size: 11_950_000_000, kind: "dir", goto: null },
+      { path: "/Applications (system-wide)", name: "Applications (system-wide)", category: "applications", size: 11_030_000_000, kind: "dir", goto: null },
+      { path: "~/Desktop", name: "Desktop", category: "other", size: 6_400_000_000, kind: "dir", goto: null },
+      { path: "~/.gdrive-excluded", name: ".gdrive-excluded", category: "other", size: 3_370_000_000, kind: "dir", goto: "npm-global" },
+      { path: "~/.npm-global", name: ".npm-global", category: "other", size: 1_610_000_000, kind: "dir", goto: "npm-global" },
+      { path: "~/.local", name: ".local", category: "other", size: 1_460_000_000, kind: "dir", goto: null },
+    ],
+  },
+  "fallback:other": {
+    label: "Other", fallbackNote: "Other isn't in one place — its contents are scattered across many real folders, not concentrated in a top-level one. Showing everything at the top level instead.",
+    items: [
+      { path: "~/Library", name: "Library", category: "system-data", size: 86_950_000_000, kind: "dir", goto: null },
+      { path: "~/Desktop", name: "Desktop", category: "other", size: 6_400_000_000, kind: "dir", goto: null },
+      { path: "~/Downloads", name: "Downloads", category: "other", size: 2_100_000_000, kind: "dir", goto: null },
+      { path: "~/dev", name: "dev", category: "other", size: 4_800_000_000, kind: "dir", goto: null },
+      { path: "~/.coding-local", name: ".coding-local", category: "other", size: 5_900_000_000, kind: "dir", goto: null },
+    ],
+  },
+  "npm-global": {
+    label: ".npm-global",
+    items: [ { path: "~/.npm-global/lib", name: "lib", category: "developer", size: 1_610_000_000, kind: "dir", goto: "lib" } ],
+  },
+  "lib": {
+    label: "lib",
+    items: [ { path: "~/.npm-global/lib/node_modules", name: "node_modules", category: "developer", size: 1_610_000_000, kind: "dir", goto: "node_modules" } ],
+  },
+  "node_modules": {
+    label: "node_modules",
+    items: [
+      { path: "~/.npm-global/lib/node_modules/search-console-mcp", name: "search-console-mcp", category: "developer", size: 310_000_000, kind: "dir", goto: "search-console-mcp" },
+      { path: "~/.npm-global/lib/node_modules/happy-coder", name: "happy-coder", category: "developer", size: 300_000_000, kind: "dir", goto: null },
+      { path: "~/.npm-global/lib/node_modules/vercel", name: "vercel", category: "developer", size: 200_000_000, kind: "dir", goto: null },
+      { path: "~/.npm-global/lib/node_modules/wrangler", name: "wrangler", category: "developer", size: 180_000_000, kind: "dir", goto: null },
+    ],
+  },
+  "search-console-mcp": {
+    label: "search-console-mcp",
+    items: [
+      { path: "~/.npm-global/lib/node_modules/search-console-mcp/node_modules", name: "node_modules", category: "developer", size: 310_000_000, kind: "dir",
+        flag: { conf: "safe", reason: "Stale node_modules — Build dependencies untouched for 163 days — safe to remove, reinstalled automatically by npm/yarn/pnpm when needed" } },
+      { path: "~/.npm-global/lib/node_modules/search-console-mcp/LICENSE", name: "LICENSE", category: "developer", size: 4_000, kind: "file" },
+      { path: "~/.npm-global/lib/node_modules/search-console-mcp/README.md", name: "README.md", category: "developer", size: 16_000, kind: "file" },
+      { path: "~/.npm-global/lib/node_modules/search-console-mcp/dist", name: "dist", category: "developer", size: 578_000, kind: "dir", goto: null },
+      { path: "~/.npm-global/lib/node_modules/search-console-mcp/package.json", name: "package.json", category: "developer", size: 4_000, kind: "file" },
+    ],
+  },
+  "reclaimable": {
+    label: "Reclaimable", isReclaimable: true,
+    items: [
+      { path: "/Users/deepak/Library/Application Support/FileProvider/7ABC.../database/db", name: "/Users/deepak/Library/Application Support/FileProvider/7ABC.../database/db", category: "reclaimable", size: 1_580_000_000, kind: "file", flag: { conf: "caution", reason: "Stale large file — Large file (1.58 GB) untouched for 168 days" } },
+      { path: "/Applications/Docker.app/Contents/Resources/linuxkit/boot.img", name: "/Applications/Docker.app/Contents/Resources/linuxkit/boot.img", category: "reclaimable", size: 600_000_000, kind: "file", flag: { conf: "caution", reason: "Stale large file — Large file (0.60 GB) untouched for 313 days" } },
+      { path: "/Users/deepak/Library/.../state.vscdb", name: "/Users/deepak/Library/Application Support/Code/User/workspaceStorage/.../state.vscdb", category: "reclaimable", size: 560_000_000, kind: "file", flag: { conf: "caution", reason: "Stale large file — Large file (0.56 GB) untouched for 101 days" } },
+      { path: "/Users/deepak/Library/.../state.vscdb.backup", name: "/Users/deepak/Library/Application Support/Code/User/workspaceStorage/.../state.vscdb.backup", category: "reclaimable", size: 560_000_000, kind: "file", flag: { conf: "caution", reason: "Stale large file — untouched 101 days · Duplicate file — Identical content to .../state.vscdb" } },
+      { path: "/Applications/Claude.app/.../Electron Framework", name: "/Applications/Claude.app/Contents/Frameworks/Electron Framework.framework/.../Electron Framework", category: "reclaimable", size: 370_000_000, kind: "file", flag: { conf: "caution", reason: "Stale large file — Large file (0.37 GB) untouched for 160 days" } },
+      { path: "/Users/deepak/.cache/uv/.../libtorch_cpu.dylib", name: "/Users/deepak/.cache/uv/archive-v0/.../libtorch_cpu.dylib", category: "reclaimable", size: 340_000_000, kind: "file", flag: { conf: "caution", reason: "Duplicate file — Identical content to .../libtorch_cpu.dylib" } },
+      { path: "~/.npm-global/lib/node_modules/search-console-mcp/node_modules", name: "/Users/deepak/.npm-global/lib/node_modules/search-console-mcp/node_modules", category: "reclaimable", size: 310_000_000, kind: "file", flag: { conf: "safe", reason: "Stale node_modules — Build dependencies untouched for 163 days — safe to remove, reinstalled automatically by npm/yarn/pnpm when needed" } },
+      { path: "/Users/deepak/Library/.../claude-code-vm/2.1.78/claude", name: "/Users/deepak/Library/Application Support/Claude/claude-code-vm/2.1.78/claude", category: "reclaimable", size: 230_000_000, kind: "file", flag: { conf: "caution", reason: "Stale large file — Large file (0.23 GB) untouched for 160 days" } },
+    ],
+  },
+};
+
+// ── State ──
+let stack = ["categories"];
+let viewMode = "treemap";
+let selected = new Map(); // path -> {name, size}
+let protectedPaths = new Set();
+let phase = "idle"; // idle | confirming | done
+
+function levelIdFor(item) {
+  if (item.viewOnly) return null;
+  if (item.path.startsWith("cat:")) return item.goto || `fallback:${item.path.slice(4)}`;
+  return item.kind === "dir" && item.goto !== undefined ? item.goto : (item.kind === "dir" ? null : null);
+}
+
+function currentLevel() { return TREE[stack[stack.length - 1]]; }
+
+function drillInto(item) {
+  const next = levelIdFor(item);
+  if (next) stack.push(next);
+  render();
+}
+
+function toggleSelect(item) {
+  if (protectedPaths.has(item.path)) return;
+  if (selected.has(item.path)) selected.delete(item.path);
+  else selected.set(item.path, { name: item.name, size: item.size });
+  render();
+}
+
+function protectItem(path) {
+  protectedPaths.add(path);
+  selected.delete(path);
+  render();
+}
+
+function selectAllVisible() {
+  const lvl = currentLevel();
+  for (const it of lvl.items) {
+    if (it.viewOnly || protectedPaths.has(it.path)) continue;
+    if (stack[stack.length-1] === "categories") continue;
+    if (!selected.has(it.path)) selected.set(it.path, { name: it.name, size: it.size });
+  }
+  render();
+}
+function clearSelection() { selected.clear(); render(); }
+
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+
+function render() {
+  const app = document.getElementById("app");
+  app.innerHTML = "";
+  const lvl = currentLevel();
+  const isTop = stack[stack.length-1] === "categories";
+  const isReclaimable = !!lvl.isReclaimable;
+
+  // header
+  const header = el("header");
+  const total = el("div", "disk-total");
+  total.innerHTML = `<div class="num">${fmt(TREE.categories.diskUsed)}</div>
+    <div class="meta"><span>OF ${fmt(TREE.categories.diskTotal)} USED — REST IS FREE</span><span>Scanned 01/09/2026, 16:27:15 (demo data)</span></div>`;
+  header.appendChild(total);
+  const right = el("div", "header-right");
+  if (!isReclaimable) {
+    const toggle = el("div", "toggle");
+    ["treemap","list"].forEach(m => {
+      const b = el("button", m===viewMode ? "active":"", m[0].toUpperCase()+m.slice(1));
+      b.onclick = () => { viewMode = m; render(); };
+      toggle.appendChild(b);
+    });
+    right.appendChild(toggle);
+  }
+  const refresh = el("button", "refresh", "Refresh");
+  refresh.onclick = () => alert("Demo only — this button re-scans the real disk in the actual app.");
+  right.appendChild(refresh);
+  header.appendChild(right);
+  app.appendChild(header);
+
+  // breadcrumb
+  const bc = el("div", "breadcrumb");
+  stack.forEach((id, i) => {
+    if (i > 0) bc.appendChild(el("span", "sep", "/"));
+    const b = el("button", i === stack.length-1 ? "current" : "", TREE[id].label);
+    b.onclick = () => { stack = stack.slice(0, i+1); render(); };
+    bc.appendChild(b);
+  });
+  app.appendChild(bc);
+
+  if (isTop) {
+    app.appendChild(el("div", "banner",
+      "6 folders couldn't be read (.Trash, Accounts, AddressBook, +3 more) — <span style='color:var(--accent)'>Open Full Disk Access settings →</span> (demo)"));
+  }
+  if (lvl.fallbackNote) {
+    app.appendChild(el("div", "banner", lvl.fallbackNote));
+  }
+
+  // main
+  const main = el("main");
+  if (isReclaimable || viewMode === "list") {
+    main.appendChild(renderList(lvl, isTop));
+  } else {
+    main.appendChild(renderTreemap(lvl, isTop));
+  }
+  app.appendChild(main);
+
+  // select-all bar
+  if (!isTop) {
+    const bar = el("div", "selectbar");
+    const sa = el("span", "link", "Select all visible");
+    sa.onclick = selectAllVisible;
+    bar.appendChild(sa);
+    if (selected.size > 0) {
+      const cl = el("span", "clear", "Clear selection");
+      cl.onclick = clearSelection;
+      bar.appendChild(cl);
+    }
+    app.appendChild(bar);
+  }
+
+  // sticky selection bar
+  if (selected.size > 0 && phase === "idle") {
+    const total = [...selected.values()].reduce((s,d)=>s+d.size,0);
+    const sb = el("div", "stickybar");
+    sb.appendChild(el("span", null, `${selected.size} item${selected.size===1?"":"s"} selected · ${fmt(total)}`));
+    const btn = el("button", null, "Delete selected…");
+    btn.onclick = () => { phase = "confirming"; render(); };
+    sb.appendChild(btn);
+    app.appendChild(sb);
+  }
+
+  if (phase === "confirming") app.appendChild(renderConfirmModal());
+  if (phase === "done") app.appendChild(renderDoneModal());
+}
+
+function renderTreemap(lvl, disableSelection) {
+  const wrap = el("div", "treemap");
+  const total = lvl.items.reduce((s,i)=>s+i.size, 0);
+  lvl.items.forEach(item => {
+    const pct = Math.max((item.size / total) * 100, 4);
+    const cell = el("div", "cell" + (item.viewOnly ? " view-only" : ""));
+    cell.style.flexBasis = pct + "%";
+    cell.style.flexGrow = item.size;
+    cell.style.minHeight = "140px";
+    cell.style.background = item.viewOnly
+      ? `repeating-linear-gradient(135deg, ${COLORS[item.category]}, ${COLORS[item.category]} 8px, var(--bg) 8px, var(--bg) 9px)`
+      : COLORS[item.category] || COLORS.other;
+    cell.innerHTML = `<div class="name">${item.viewOnly ? "🔒 " : ""}${item.name}</div><div class="size">${fmt(item.size)}${item.viewOnly ? " · view only" : ""}</div>`;
+
+    if (!disableSelection && !item.viewOnly) {
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.className = "cb";
+      cb.checked = selected.has(item.path);
+      cb.disabled = protectedPaths.has(item.path);
+      cb.onclick = (e) => { e.stopPropagation(); toggleSelect(item); };
+      cell.appendChild(cb);
+    }
+    if (item.flag) {
+      cell.appendChild(el("span", "badge " + item.flag.conf, item.flag.conf));
+    }
+    cell.onclick = () => {
+      if (item.viewOnly) return;
+      if (levelIdFor(item)) drillInto(item);
+      else if (!disableSelection) toggleSelect(item);
+    };
+    wrap.appendChild(cell);
+  });
+  return wrap;
+}
+
+function renderList(lvl, isTop) {
+  const wrap = el("div", "list-wrap");
+  const inner = el("div", "list-inner");
+  wrap.appendChild(inner);
+
+  if (isTop) {
+    const card = el("div", "usage-card");
+    const total = lvl.items.reduce((s,i)=>s+i.size, 0);
+    card.innerHTML = `<div class="row"><span class="name">Macintosh HD</span><span class="val mono">${fmt(total)} of ${fmt(lvl.diskTotal)} used</span></div>`;
+    const bar = el("div", "usage-bar");
+    lvl.items.forEach(it => {
+      const seg = el("span");
+      seg.style.width = ((it.size/lvl.diskTotal)*100) + "%";
+      seg.style.background = it.viewOnly ? "var(--border)" : COLORS[it.category];
+      bar.appendChild(seg);
+    });
+    const free = el("span"); free.style.flex = "1"; free.style.background = "var(--bg)";
+    bar.appendChild(free);
+    card.appendChild(bar);
+    const legend = el("div", "legend");
+    lvl.items.forEach(it => {
+      const item = el("span", "item");
+      item.innerHTML = `<span class="dot" style="background:${it.viewOnly ? "var(--border)" : COLORS[it.category]}"></span>${it.viewOnly ? "System" : title(it.category)}`;
+      legend.appendChild(item);
+    });
+    card.appendChild(legend);
+    inner.appendChild(card);
+  }
+
+  const rows = el("div", "rows-card");
+  [...lvl.items].sort((a,b)=>b.size-a.size).forEach(item => {
+    const row = el("div", "item-row");
+    const selectable = !isTop && !item.viewOnly && !protectedPaths.has(item.path);
+    if (selectable) {
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.style.marginTop = "4px";
+      cb.checked = selected.has(item.path);
+      cb.onchange = () => toggleSelect(item);
+      row.appendChild(cb);
+    }
+    const icon = el("span", "icon", item.viewOnly ? "🔒" : (ICONS[item.category] || "📁"));
+    icon.style.background = `color-mix(in oklch, ${COLORS[item.category]} 22%, var(--bg))`;
+    row.appendChild(icon);
+
+    const body = el("div", "body");
+    const nameLine = el("div", "name-line");
+    nameLine.appendChild(el("span", "name", isTop && !item.viewOnly ? title(item.category) : item.name));
+    if (protectedPaths.has(item.path)) nameLine.appendChild(el("span", "tag protected", "🔒 protected"));
+    if (item.flag) nameLine.appendChild(el("span", "tag " + item.flag.conf, item.flag.conf));
+    body.appendChild(nameLine);
+    if (item.flag) body.appendChild(el("div", "reason", item.flag.reason));
+    if (item.viewOnly) body.appendChild(el("div", "reason", "Includes macOS itself and system-internal folders this tool deliberately doesn't scan — never selectable, never deletable."));
+    if (item.kind === "dir" && !item.viewOnly && levelIdFor(item)) {
+      body.style.cursor = "pointer";
+      body.onclick = () => drillInto(item);
+    }
+    row.appendChild(body);
+
+    const rightCol = el("div", "right");
+    rightCol.appendChild(el("span", "size mono", fmt(item.size)));
+    if (selectable) {
+      const pbtn = el("button", null, "Protect");
+      pbtn.onclick = () => protectItem(item.path);
+      rightCol.appendChild(pbtn);
+    }
+    row.appendChild(rightCol);
+
+    rows.appendChild(row);
+  });
+  inner.appendChild(rows);
+  return wrap;
+}
+
+function renderConfirmModal() {
+  const overlay = el("div", "overlay");
+  const modal = el("div", "modal");
+  const total = [...selected.values()].reduce((s,d)=>s+d.size,0);
+  modal.appendChild(el("h2", null, `Move ${selected.size} item${selected.size===1?"":"s"} to Trash?`));
+  modal.appendChild(el("p", null, `Total: <span class="mono" style="color:var(--text-primary)">${fmt(total)}</span>. Moved to Trash, not permanently deleted — recoverable until you empty it yourself.`));
+  const ul = el("ul");
+  selected.forEach((d, path) => {
+    const li = el("li");
+    li.innerHTML = `<span>${path}</span><span>${fmt(d.size)}</span>`;
+    ul.appendChild(li);
+  });
+  modal.appendChild(ul);
+  const actions = el("div", "modal-actions");
+  const cancel = el("button", "btn-outline", "Cancel");
+  cancel.onclick = () => { phase = "idle"; render(); };
+  const confirm = el("button", "btn-solid", "Move to Trash");
+  confirm.onclick = () => { phase = "done"; render(); };
+  actions.appendChild(cancel); actions.appendChild(confirm);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  return overlay;
+}
+
+function renderDoneModal() {
+  const overlay = el("div", "overlay");
+  const modal = el("div", "modal");
+  const total = [...selected.values()].reduce((s,d)=>s+d.size,0);
+  const count = selected.size;
+  modal.appendChild(el("h2", null, `Freed ${fmt(total)}`));
+  modal.appendChild(el("p", null, `${count} item${count===1?"":"s"} moved to Trash. (Demo — nothing was actually deleted.)`));
+  modal.appendChild(el("p", null, "Run a fresh scan to see the freed space reflected in the totals."));
+  const actions = el("div", "modal-actions");
+  const done = el("button", "btn-solid", "Done");
+  done.onclick = () => { selected.clear(); phase = "idle"; render(); };
+  actions.appendChild(done);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  return overlay;
+}
+
+render();
+</script>
+</body>
+</html>
