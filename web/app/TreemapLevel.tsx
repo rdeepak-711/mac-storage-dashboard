@@ -5,6 +5,7 @@ import { layoutTreemap } from "@/lib/treemap";
 import { formatBytes } from "@/lib/format";
 import type { MergedFlag } from "@/lib/cleanup-flags";
 import { isPathProtected } from "@/lib/cleanup-flags";
+import { getFolderDescription } from "@/lib/folder-descriptions";
 import type { DisplayEntry } from "@/lib/scan-types";
 import type { ProtectedPath } from "@/lib/scan-types";
 
@@ -29,6 +30,7 @@ export function TreemapLevel({
   protectedPaths,
   onToggleSelect,
   onDrillInto,
+  onDrillIntoGroup,
 }: {
   entries: DisplayEntry[];
   flagsByPath: Map<string, MergedFlag>;
@@ -36,6 +38,11 @@ export function TreemapLevel({
   protectedPaths: ProtectedPath[];
   onToggleSelect: (path: string) => void;
   onDrillInto: (entry: DisplayEntry) => void;
+  /** The "+N more items" cell was previously a dead end — this lets it
+   * drill into the real folded entries instead (see lib/treemap.ts's
+   * groupedEntries). Optional so callers that never group (noGroup mode)
+   * don't need to supply it. */
+  onDrillIntoGroup?: (groupedEntries: DisplayEntry[], label: string) => void;
 }) {
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [hoveredPath, setHoveredPath] = useState<string | null>(null);
@@ -64,7 +71,7 @@ export function TreemapLevel({
       : [];
 
   const hovered = rects.find((r) => r.path === hoveredPath) ?? null;
-  const tooltipWidth = 220;
+  const tooltipWidth = 280;
   const tooltipHeight = 60;
   const tooltipX = Math.min(cursor.x + 16, Math.max(0, size.width - tooltipWidth - 8));
   const tooltipY = Math.min(cursor.y + 16, Math.max(0, size.height - tooltipHeight - 8));
@@ -95,13 +102,15 @@ export function TreemapLevel({
             key={r.path}
             onMouseEnter={() => setHoveredPath(r.path)}
             onClick={() => {
-              if (isGrouped || !entry) return;
+              if (isGrouped) {
+                if (r.groupedEntries && onDrillIntoGroup) onDrillIntoGroup(r.groupedEntries, r.name);
+                return;
+              }
+              if (!entry) return;
               if (canDrillIn) onDrillInto(entry);
               else if (isSelectable) onToggleSelect(r.path);
             }}
-            className={`absolute box-border flex flex-col justify-end overflow-hidden p-2 transition-all duration-150 ${
-              isGrouped ? "cursor-default" : "cursor-pointer"
-            }`}
+            className="absolute box-border flex cursor-pointer flex-col justify-end overflow-hidden p-2 transition-all duration-150"
             style={{
               left: r.x,
               top: r.y,
@@ -122,26 +131,44 @@ export function TreemapLevel({
                 className="absolute left-2 top-2"
               />
             )}
+            {/*
+              A treemap tile has no room for the full badge (see
+              app/FlagBadge.tsx) — only the disposition fits, and the
+              recoverability and date are in the tooltip and in the list
+              view. Deliberately not green: green reads as "approved, go
+              ahead", which is what the old "safe" pill taught the eye to
+              do without reading.
+            */}
             {flag && showLabel && (
               <span
+                title={`${flag.recoverability} · ${flag.reason}`}
                 className={`absolute right-2 top-2 rounded px-1 py-0.5 text-[9px] font-semibold uppercase ${
-                  flag.confidence === "safe"
-                    ? "bg-[color-mix(in_oklch,oklch(0.64_0.13_145)_35%,var(--bg))] text-[oklch(0.85_0.13_145)]"
+                  flag.disposition === "suggested"
+                    ? "bg-[color-mix(in_oklch,oklch(0.64_0.09_230)_35%,var(--bg))] text-[oklch(0.87_0.09_230)]"
                     : "bg-[color-mix(in_oklch,oklch(0.64_0.15_60)_35%,var(--bg))] text-[oklch(0.85_0.15_60)]"
                 }`}
               >
-                {flag.confidence}
+                {flag.disposition === "review" ? "your call" : "suggested"}
               </span>
             )}
             {showLabel && (
               <>
-                <div className="flex items-start gap-1 text-sm font-semibold uppercase leading-tight tracking-wide text-[var(--bg)] [overflow-wrap:anywhere]">
+                <div
+                  className={`flex items-start gap-1 font-semibold leading-tight text-[var(--bg)] [-webkit-box-orient:vertical] [display:-webkit-box] overflow-hidden break-words ${
+                    r.width < 110 ? "text-xs [-webkit-line-clamp:2]" : "text-sm [-webkit-line-clamp:2]"
+                  }`}
+                >
                   {isProtected && <span aria-hidden>🔒</span>}
                   <span>{isGrouped ? `+ ${r.name}` : r.name}</span>
                 </div>
                 <div className="font-[family-name:var(--font-data)] text-xs text-[var(--bg)] opacity-80">
                   {formatBytes(r.allocatedBytes)}
                 </div>
+                {!isGrouped && r.height > 90 && r.width > 130 && getFolderDescription(r.name) && (
+                  <div className="mt-0.5 min-w-0 max-w-full truncate text-[11px] text-[var(--bg)] opacity-70">
+                    {getFolderDescription(r.name)}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -157,6 +184,12 @@ export function TreemapLevel({
           <div className="font-[family-name:var(--font-data)] text-xs text-[var(--text-secondary)]">
             {formatBytes(hovered.allocatedBytes)}
           </div>
+          {hovered.groupedCount !== undefined && (
+            <div className="mt-1 text-xs text-[var(--accent)]">Click to see these {hovered.groupedCount} items</div>
+          )}
+          {getFolderDescription(hovered.name) && (
+            <div className="mt-1 text-xs text-[var(--text-secondary)]">{getFolderDescription(hovered.name)}</div>
+          )}
           {flagsByPath.get(hovered.path) && (
             <div className="mt-1 text-xs text-[var(--text-secondary)]">
               {flagsByPath.get(hovered.path)!.reasons.join(" · ")}

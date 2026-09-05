@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { formatBytes } from "@/lib/format";
 import { mergeFlagsByPath, isPathProtected, type MergedFlag } from "@/lib/cleanup-flags";
 import { TreemapLevel } from "./TreemapLevel";
 import { ListLevel } from "./ListLevel";
+import { AiEvalPanel, type AiEvalReport } from "./AiEvalPanel";
 import type { Category, DisplayEntry, ProtectedPath, ScanSnapshot, StorageEntry } from "@/lib/scan-types";
 
 type Status = "loading" | "idle" | "scanning" | "error";
@@ -38,22 +40,73 @@ const ROOT: FolderCrumb = { path: "__root__", name: "Home" };
  * navigation AND across the Browse/Clean up mode switch — a cart, not a
  * per-level selection.
  */
+/**
+ * useSearchParams() requires a <Suspense> boundary (Next 16 App Router —
+ * see node_modules/next/dist/docs/01-app/03-api-reference/04-functions/use-search-params.md).
+ * This is the real default export; DashboardApp below does the actual work.
+ */
 export default function Home() {
+  return (
+    <Suspense fallback={null}>
+      <DashboardApp />
+    </Suspense>
+  );
+}
+
+function DashboardApp() {
   const [scan, setScan] = useState<ScanSnapshot | null>(null);
   const [protectedPaths, setProtectedPaths] = useState<ProtectedPath[]>([]);
   const [status, setStatus] = useState<Status>("loading");
   const [viewMode, setViewMode] = useState<ViewMode>("treemap");
-  const [mode, setMode] = useState<Mode>("browse");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
 
-  const [breadcrumb, setBreadcrumb] = useState<FolderCrumb[]>([ROOT]);
   const [folderCache, setFolderCache] = useState<Map<string, StorageEntry[]>>(new Map());
 
+  // Real browser Back/Forward integration — added 2026-09-02 after Deepak
+  // pointed out the back gesture did nothing useful. A first attempt used
+  // raw window.history.pushState/popstate directly and looked right in
+  // isolation, but real testing caught it: Next.js's App Router manages
+  // browser history itself, and fighting it that way caused an actual
+  // page reload on Back (visible as a second "HMR connected" + the tab
+  // title flashing "Loading http://localhost:3000/") instead of a clean
+  // in-place state restore — jumping straight to Home instead of one
+  // level up. Fixed the correct way: mode/breadcrumb are derived FROM the
+  // URL's `s` query param via useSearchParams (which Next.js does keep in
+  // sync with real Back/Forward), and every navigation action calls
+  // router.push with an updated `s` param instead of touching history
+  // directly. folderCache/selection stay in memory the whole time (this
+  // is client-side navigation, never a real page reload), so going back
+  // to an already-visited level shows instantly, no re-fetch.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  const { mode, breadcrumb } = useMemo<{ mode: Mode; breadcrumb: FolderCrumb[] }>(() => {
+    const raw = searchParams.get("s");
+    if (!raw) return { mode: "browse", breadcrumb: [ROOT] };
+    try {
+      const parsed = JSON.parse(raw) as { mode?: string; breadcrumb?: FolderCrumb[] };
+      return {
+        mode: parsed.mode === "cleanup" ? "cleanup" : "browse",
+        breadcrumb: Array.isArray(parsed.breadcrumb) && parsed.breadcrumb.length ? parsed.breadcrumb : [ROOT],
+      };
+    } catch {
+      return { mode: "browse", breadcrumb: [ROOT] };
+    }
+  }, [searchParams]);
+
+  function navigate(newMode: Mode, newBreadcrumb: FolderCrumb[], opts: { replace?: boolean } = {}) {
+    const encoded = encodeURIComponent(JSON.stringify({ mode: newMode, breadcrumb: newBreadcrumb }));
+    const url = `${pathname}?s=${encoded}`;
+    if (opts.replace) router.replace(url, { scroll: false });
+    else router.push(url, { scroll: false });
+  }
+
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [selectedDetails, setSelectedDetails] = useState<Map<string, { name: string; sizeBytes: number }>>(
-    new Map(),
-  );
+  const [selectedDetails, setSelectedDetails] = useState<
+    Map<string, { name: string; sizeBytes: number; modifiedAt: string; category: Category }>
+  >(new Map());
   const [phase, setPhase] = useState<DeletePhase>("idle");
   const [deleteResult, setDeleteResult] = useState<{
     deleted: { path: string; sizeBytes: number }[];
@@ -72,6 +125,13 @@ export default function Home() {
   const [aiUnavailable, setAiUnavailable] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+
+  // The eval harness (lib/ai-eval.mjs) — what makes the AI feature
+  // measurable instead of a black box. Fetched on demand, not on every
+  // page load, since golden-set scoring costs one real model call.
+  const [aiEvalReport, setAiEvalReport] = useState<AiEvalReport | null>(null);
+  const [aiEvalLoading, setAiEvalLoading] = useState(false);
+  const [aiEvalError, setAiEvalError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -103,7 +163,7 @@ export default function Home() {
       // previous scan's per-directory listing files, which may no longer
       // match reality (files moved/deleted since).
       setFolderCache(new Map());
-      setBreadcrumb([ROOT]);
+      navigate("browse", [ROOT], { replace: true });
       setStatus("idle");
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -170,11 +230,31 @@ export default function Home() {
 
   function drillInto(entry: DisplayEntry) {
     if (entry.kind === "directory") {
-      setBreadcrumb((prev) => [...prev, { path: entry.path, name: entry.name }]);
+      navigate(mode, [...breadcrumb, { path: entry.path, name: entry.name }]);
     }
   }
 
-  function toggleSelect(path: string, name: string, sizeBytes: number) {
+  // The treemap's "+N more items" cell used to be a dead end — no way to
+  // see what it actually folded together. Since the real folded entries
+  // are already known client-side (lib/treemap.ts exposes them, no fetch
+  // needed), seed the folder cache directly with a synthetic key scoped
+  // to the current real path (so drilling into a group at two different
+  // real folders never collides) and push a normal breadcrumb entry —
+  // everything else (real folders inside it, selection, flags) works
+  // exactly like any other level from here.
+  function drillIntoGroup(groupedEntries: DisplayEntry[], label: string) {
+    const syntheticPath = `${currentPath}::grouped`;
+    setFolderCache((prev) => new Map(prev).set(syntheticPath, groupedEntries));
+    navigate(mode, [...breadcrumb, { path: syntheticPath, name: label }]);
+  }
+
+  function toggleSelect(
+    path: string,
+    name: string,
+    sizeBytes: number,
+    modifiedAt: string = "",
+    category: Category = "other",
+  ) {
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
@@ -184,21 +264,33 @@ export default function Home() {
     setSelectedDetails((prev) => {
       const next = new Map(prev);
       if (next.has(path)) next.delete(path);
-      else next.set(path, { name, sizeBytes });
+      else next.set(path, { name, sizeBytes, modifiedAt, category });
       return next;
     });
   }
 
   function handleToggleFromLevel(path: string) {
     const entry = currentEntries?.find((e) => e.path === path);
-    if (entry) toggleSelect(entry.path, entry.name, entry.allocatedBytes);
+    if (entry) toggleSelect(entry.path, entry.name, entry.allocatedBytes, entry.modifiedAt, entry.category);
   }
 
+  /**
+   * Bulk selection deliberately skips `review` items (added 2026-09-03).
+   *
+   * A review item is one the tool could NOT prove is regenerable — it is
+   * shown so it stops being invisible, not because it should go. Letting
+   * "Select all" sweep those in would recreate the exact failure the
+   * three-disposition model exists to prevent: a single confident click
+   * standing in for a judgement only the user can make. Review items stay
+   * individually selectable; they are just never selected FOR you.
+   */
   function selectAllVisible() {
     if (!currentEntries) return;
     for (const entry of currentEntries) {
       if (isPathProtected(entry.path, protectedPaths)) continue;
-      if (!selected.has(entry.path)) toggleSelect(entry.path, entry.name, entry.allocatedBytes);
+      if (flagsByPath.get(entry.path)?.disposition === "review") continue;
+      if (!selected.has(entry.path))
+        toggleSelect(entry.path, entry.name, entry.allocatedBytes, entry.modifiedAt, entry.category);
     }
   }
 
@@ -230,8 +322,14 @@ export default function Home() {
   }
 
   async function getAiSuggestions() {
-    const candidatePaths = [...selected].filter((p) => !flagsByPath.has(p));
-    if (candidatePaths.length === 0) return;
+    const candidates = [...selected]
+      .filter((p) => !flagsByPath.has(p))
+      .map((p) => {
+        const d = selectedDetails.get(p);
+        return d && { path: p, name: d.name, allocatedBytes: d.sizeBytes, modifiedAt: d.modifiedAt, category: d.category };
+      })
+      .filter((c): c is NonNullable<typeof c> => !!c);
+    if (candidates.length === 0) return;
     setAiLoading(true);
     setAiError(null);
     setAiSuggestions(null);
@@ -240,7 +338,7 @@ export default function Home() {
       const res = await fetch("/api/ai-suggest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidatePaths }),
+        body: JSON.stringify({ candidates }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "AI suggestion request failed");
@@ -250,6 +348,21 @@ export default function Home() {
       setAiError(err instanceof Error ? err.message : String(err));
     } finally {
       setAiLoading(false);
+    }
+  }
+
+  async function getAiEval() {
+    setAiEvalLoading(true);
+    setAiEvalError(null);
+    try {
+      const res = await fetch("/api/ai-eval");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "AI eval request failed");
+      setAiEvalReport(data as AiEvalReport);
+    } catch (err) {
+      setAiEvalError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAiEvalLoading(false);
     }
   }
 
@@ -283,7 +396,45 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "delete failed");
-      setDeleteResult({ deleted: data.deleted ?? [], skipped: data.skipped ?? [] });
+      const deleted: { path: string; sizeBytes: number }[] = data.deleted ?? [];
+      setDeleteResult({ deleted, skipped: data.skipped ?? [] });
+
+      // Real deletions already happened on disk — redraw from that
+      // response instead of waiting for a fresh multi-minute rescan.
+      // Read categories from selectedDetails BEFORE clearSelection()
+      // wipes it (it's the only place a deleted path's category is
+      // still known client-side; /api/delete's response doesn't carry
+      // one).
+      const deletedPaths = new Set(deleted.map((d) => d.path));
+      const categoryByPath = new Map(
+        deleted.map((d) => [d.path, selectedDetails.get(d.path)?.category]),
+      );
+      const freed = deleted.reduce((sum, d) => sum + d.sizeBytes, 0);
+
+      if (deletedPaths.size > 0) {
+        setFolderCache((prev) => {
+          const next = new Map<string, StorageEntry[]>();
+          for (const [key, entries] of prev) next.set(key, entries.filter((e) => !deletedPaths.has(e.path)));
+          return next;
+        });
+
+        setScan((prev) => {
+          if (!prev) return prev;
+          const categoryTotals = { ...prev.categoryTotals };
+          for (const d of deleted) {
+            const cat = categoryByPath.get(d.path);
+            if (cat) categoryTotals[cat] = Math.max(0, categoryTotals[cat] - d.sizeBytes);
+          }
+          return {
+            ...prev,
+            diskUsedBytes: Math.max(0, prev.diskUsedBytes - freed),
+            diskFreeBytes: prev.diskFreeBytes + freed,
+            categoryTotals,
+            cleanupFlags: prev.cleanupFlags.filter((f) => !deletedPaths.has(f.path)),
+          };
+        });
+      }
+
       clearSelection();
       setPhase("done");
     } catch (err) {
@@ -302,7 +453,7 @@ export default function Home() {
             {scan ? formatBytes(scan.diskUsedBytes) : "—"}
           </div>
           <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-wide text-[var(--text-secondary)]">
+            <span className="text-sm text-[var(--text-secondary)]">
               {scan ? `of ${formatBytes(scan.diskTotalBytes)} used — rest is free` : "No scan yet"}
             </span>
             {scan && (
@@ -318,7 +469,7 @@ export default function Home() {
             {(["browse", "cleanup"] as const).map((m) => (
               <button
                 key={m}
-                onClick={() => setMode(m)}
+                onClick={() => navigate(m, breadcrumb)}
                 className={`rounded px-3 py-1 capitalize transition-colors ${
                   mode === m
                     ? "bg-[var(--border)] text-[var(--text-primary)]"
@@ -362,7 +513,7 @@ export default function Home() {
             <span key={crumb.path} className="flex items-center gap-1">
               {i > 0 && <span className="text-[var(--text-secondary)]">/</span>}
               <button
-                onClick={() => setBreadcrumb(breadcrumb.slice(0, i + 1))}
+                onClick={() => navigate(mode, breadcrumb.slice(0, i + 1))}
                 className={
                   i === breadcrumb.length - 1
                     ? "text-[var(--text-primary)]"
@@ -471,6 +622,7 @@ export default function Home() {
                 protectedPaths={protectedPaths}
                 onToggleSelect={handleToggleFromLevel}
                 onDrillInto={drillInto}
+                onDrillIntoGroup={drillIntoGroup}
               />
             ) : (
               <ListLevel
@@ -499,19 +651,45 @@ export default function Home() {
               Clear selection
             </button>
           )}
-          {mode === "browse" && [...selected].some((p) => !flagsByPath.has(p)) && (
-            <button onClick={getAiSuggestions} disabled={aiLoading} className="text-[var(--accent)] hover:underline disabled:opacity-50">
-              {aiLoading ? "Asking AI…" : "Ask AI about selected"}
+          {mode === "browse" && (
+            <button
+              onClick={getAiSuggestions}
+              disabled={aiLoading || ![...selected].some((p) => !flagsByPath.has(p))}
+              title={
+                [...selected].some((p) => !flagsByPath.has(p))
+                  ? "Get a second opinion from AI on the items you've selected"
+                  : "Select something first — AI only weighs in on items you've picked that the rules didn't already flag"
+              }
+              className="text-[var(--accent)] hover:underline disabled:cursor-default disabled:text-[var(--text-secondary)] disabled:no-underline disabled:opacity-50"
+            >
+              {aiLoading ? "Asking AI…" : "🤖 Ask AI about selected"}
+            </button>
+          )}
+          {mode === "browse" && (
+            <button
+              onClick={getAiEval}
+              disabled={aiEvalLoading}
+              title="How good the AI suggestions actually are — real acceptance rate plus agreement with the rule engine"
+              className="text-[var(--accent)] hover:underline disabled:cursor-default disabled:opacity-50"
+            >
+              {aiEvalLoading ? "Scoring…" : "📊 Eval"}
             </button>
           )}
         </div>
       )}
 
+      {aiEvalError && (
+        <div className="border-t border-[var(--border)] bg-[var(--surface)] px-6 py-3 text-sm">
+          <p className="mx-auto max-w-[1600px] text-xs text-red-400">AI eval request failed: {aiEvalError}</p>
+        </div>
+      )}
+      {aiEvalReport && <AiEvalPanel report={aiEvalReport} onClose={() => setAiEvalReport(null)} />}
+
       {(aiSuggestions || aiUnavailable || aiError) && (
         <div className="border-t border-[var(--border)] bg-[var(--surface)] px-6 py-3 text-sm">
-          <div className="mx-auto max-w-2xl">
+          <div className="mx-auto max-w-[1600px]">
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wide text-[var(--accent)]">
+              <span className="text-sm font-semibold text-[var(--accent)]">
                 AI Suggestions — worth a look, not a recommendation to delete
               </span>
               <button
@@ -644,7 +822,8 @@ export default function Home() {
               </ul>
             )}
             <p className="mt-4 text-xs text-[var(--text-secondary)]">
-              Run a fresh scan to see the freed space reflected in the totals.
+              Totals above and any list you&apos;re viewing already reflect this. Run a fresh scan only if you want
+              deeper folders that contained these items (their own sizes, shown while browsing) to catch up too.
             </p>
             <div className="mt-4 flex justify-end">
               <button

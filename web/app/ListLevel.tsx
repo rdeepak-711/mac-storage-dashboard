@@ -4,18 +4,11 @@ import { useState } from "react";
 import { categoryColor } from "@/lib/treemap";
 import { formatBytes, categoryIcon, categoryLabel } from "@/lib/format";
 import { isPathProtected, type MergedFlag } from "@/lib/cleanup-flags";
+import { FlagBadge } from "./FlagBadge";
+import { getFolderDescription } from "@/lib/folder-descriptions";
 import type { Category, DisplayEntry, ProtectedPath } from "@/lib/scan-types";
 
-const CATEGORY_OPTIONS: Category[] = [
-  "documents",
-  "applications",
-  "developer",
-  "photos",
-  "system-data",
-  "mail",
-  "music",
-  "other",
-];
+const CATEGORY_OPTIONS: Category[] = ["documents", "downloads", "desktop", "applications", "developer", "other"];
 
 /**
  * One drill-down level rendered as a row list — used for every level
@@ -79,7 +72,7 @@ export function ListLevel({
   }
 
   return (
-    <div className="mx-auto flex h-full max-w-2xl flex-col gap-4 overflow-y-auto px-6 py-6">
+    <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-4 overflow-y-auto px-6 py-6">
       <div className="divide-y divide-[var(--border)] rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         {sorted.map((entry) => {
           const flag = flagsByPath.get(entry.path);
@@ -88,17 +81,16 @@ export function ListLevel({
           const canDrillIn = entry.kind === "directory";
 
           return (
-            <div key={entry.path} className="flex items-start gap-3 px-5 py-3">
+            <div key={entry.path} className="flex items-center gap-3 px-4 py-2">
               {isSelectable && (
                 <input
                   type="checkbox"
-                  className="mt-1"
                   checked={selected.has(entry.path)}
                   onChange={() => onToggleSelect(entry.path)}
                 />
               )}
               <span
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-base"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sm"
                 style={{ background: `color-mix(in oklch, ${categoryColor(entry.category)} 22%, var(--bg))` }}
                 aria-hidden
               >
@@ -108,23 +100,25 @@ export function ListLevel({
                 className={`min-w-0 flex-1 ${canDrillIn ? "cursor-pointer" : ""}`}
                 onClick={() => canDrillIn && onDrillInto(entry)}
               >
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-sm text-[var(--text-primary)]">{entry.name}</span>
+                <div className="flex min-w-0 items-baseline gap-2">
+                  <span className="shrink-0 text-sm text-[var(--text-primary)]">{entry.name}</span>
+                  {getFolderDescription(entry.name) && (
+                    <span className="min-w-0 flex-1 truncate text-xs text-[var(--text-secondary)]">
+                      — {getFolderDescription(entry.name)}
+                    </span>
+                  )}
                   {isProtected && (
                     <span className="shrink-0 rounded bg-[var(--border)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--text-secondary)]">
                       🔒 protected
                     </span>
                   )}
                   {flag && (
-                    <span
-                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${
-                        flag.confidence === "safe"
-                          ? "bg-[color-mix(in_oklch,oklch(0.64_0.13_145)_25%,var(--bg))] text-[oklch(0.8_0.13_145)]"
-                          : "bg-[color-mix(in_oklch,oklch(0.64_0.15_60)_25%,var(--bg))] text-[oklch(0.8_0.15_60)]"
-                      }`}
-                    >
-                      {flag.confidence}
-                    </span>
+                    <FlagBadge
+                      disposition={flag.disposition}
+                      recoverability={flag.recoverability}
+                      activity={flag.activity}
+                      lastTouchedAt={flag.lastTouchedAt}
+                    />
                   )}
                 </div>
                 {flag?.reasons.map((reasonLine) => (
@@ -146,22 +140,25 @@ export function ListLevel({
                   </div>
                 )}
               </div>
-              <div className="flex shrink-0 flex-col items-end gap-1">
-                <span className="font-[family-name:var(--font-data)] text-sm text-[var(--text-primary)]">
-                  {formatBytes(entry.allocatedBytes)}
-                </span>
-                <button
-                  onClick={() => toggleDetails(entry.path)}
-                  className="text-xs text-[var(--text-secondary)] hover:text-[var(--accent)]"
-                >
-                  {expandedPath === entry.path ? "Hide details" : "Details"}
-                </button>
-                {isSelectable && onSetCategory && (
+              <span className="w-20 shrink-0 text-right font-[family-name:var(--font-data)] text-sm text-[var(--text-primary)]">
+                {formatBytes(entry.allocatedBytes)}
+              </span>
+              <button
+                onClick={() => toggleDetails(entry.path)}
+                className="w-24 shrink-0 text-right text-xs text-[var(--text-secondary)] hover:text-[var(--accent)]"
+              >
+                {expandedPath === entry.path ? "Hide details" : "Details"}
+              </button>
+              {isSelectable && onSetCategory ? (
+                <span className="flex w-32 shrink-0 items-center gap-1">
+                  <span aria-hidden title="Wrong color? Pick the real category — fixes this folder's color, sticks on every future scan">
+                    🎨
+                  </span>
                   <select
                     value={entry.category}
                     onChange={(e) => onSetCategory(entry.path, e.target.value as Category)}
-                    className="rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-xs text-[var(--text-secondary)]"
-                    title="Fix this folder's category — sticks on every future scan"
+                    className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-xs text-[var(--text-secondary)]"
+                    title="Wrong color? Pick the real category — fixes this folder's color, sticks on every future scan"
                   >
                     {CATEGORY_OPTIONS.map((c) => (
                       <option key={c} value={c}>
@@ -169,17 +166,21 @@ export function ListLevel({
                       </option>
                     ))}
                   </select>
-                )}
-                {isSelectable && onProtect && (
-                  <button
-                    onClick={() => onProtect(entry.path)}
-                    disabled={protectingPath === entry.path}
-                    className="text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] disabled:opacity-50"
-                  >
-                    Protect
-                  </button>
-                )}
-              </div>
+                </span>
+              ) : (
+                onSetCategory && <span className="w-32 shrink-0" />
+              )}
+              {isSelectable && onProtect ? (
+                <button
+                  onClick={() => onProtect(entry.path)}
+                  disabled={protectingPath === entry.path}
+                  className="w-16 shrink-0 text-right text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] disabled:opacity-50"
+                >
+                  Protect
+                </button>
+              ) : (
+                onProtect && <span className="w-16 shrink-0" />
+              )}
             </div>
           );
         })}

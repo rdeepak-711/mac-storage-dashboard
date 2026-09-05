@@ -7,12 +7,10 @@ import {
 
 const VALID_CATEGORIES = new Set([
   "documents",
+  "downloads",
+  "desktop",
   "applications",
   "developer",
-  "photos",
-  "system-data",
-  "mail",
-  "music",
   "reclaimable",
   "other",
 ]);

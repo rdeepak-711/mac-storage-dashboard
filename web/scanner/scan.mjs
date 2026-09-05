@@ -7,6 +7,8 @@ import path from "node:path";
 import { categorize } from "./categorize.mjs";
 import { evaluateEntry, boundFlags, DUPLICATE_CANDIDATE_MIN_BYTES } from "./reclaim-rules.mjs";
 import { appendIndexEntry, pruneOldScans, listingFilename, SCANS_DIR } from "../lib/run-index.mjs";
+import { isSensitive } from "../lib/sensitive-paths.mjs";
+import { isInsideTrash } from "../lib/recoverability.mjs";
 import { readCategoryOverrides } from "../lib/category-overrides.mjs";
 
 /**
@@ -145,7 +147,20 @@ async function walk(absPath, homeDir, scanDir, categoryTotals, reclaimCandidates
       const flag = evaluateEntry(entry);
       if (flag) reclaimCandidates.push({ ...flag, allocatedBytes });
 
-      if (allocatedBytes >= DUPLICATE_CANDIDATE_MIN_BYTES) {
+      // Never even consider a sensitive path as a duplicate candidate.
+      // CAUGHT FOR REAL 2026-09-03 by scanner/verify-recoverability.mjs:
+      // the duplicate pass builds its flags directly, after the walk,
+      // without going through evaluateEntry() — so it was the one rule
+      // that bypassed the never-suggest registry, and it offered up
+      // Brave's IndexedDB and VS Code's workspace state as deletable
+      // duplicates. The delete guard refused them (nothing could have
+      // been lost), but showing a credential store as a cleanup
+      // candidate is its own kind of wrong.
+      if (
+        allocatedBytes >= DUPLICATE_CANDIDATE_MIN_BYTES &&
+        !isSensitive(absPath) &&
+        !isInsideTrash(absPath) // same bug class as the sensitive-path bypass — see isInsideTrash()
+      ) {
         const bucket = duplicateCandidatesBySize.get(allocatedBytes) ?? [];
         bucket.push(absPath);
         duplicateCandidatesBySize.set(allocatedBytes, bucket);
@@ -263,11 +278,22 @@ async function findDuplicateFlags(duplicateCandidatesBySize) {
       if (matchingPaths.length < 2) continue;
       const [kept, ...duplicates] = matchingPaths;
       for (const dup of duplicates) {
+        // A byte-identical copy is the one thing this tool can prove is
+        // recoverable without a network round trip — the original is
+        // still on the disk. That makes it `instant`, and the "restore"
+        // is simply that the other copy already exists. It stays in
+        // `review` rather than `suggested` because which of two
+        // identical files is the canonical one is a judgement only the
+        // user can make; the tool has no basis for choosing.
         flags.push({
           path: dup,
           ruleId: "duplicate-file",
-          reason: `Identical content to ${kept}`,
-          confidence: "caution",
+          disposition: "review",
+          recoverability: "instant",
+          activity: "idle",
+          reason: `Byte-for-byte identical to ${kept}, which stays where it is.`,
+          restoreCommand: null,
+          lastTouchedAt: null,
           duplicateOf: kept,
           allocatedBytes: sizeBytes,
         });

@@ -2,10 +2,15 @@ import path from "node:path";
 import { findOverrideCategory } from "../lib/category-overrides.mjs";
 
 /**
- * Maps an absolute path to one of the 9 Category ids from
+ * Maps an absolute path to one of the Category ids from
  * specs/001-mac-storage-cleanup/data-model.md. Pure function — no fs
  * access — so it's cheap to call once per top-level entry during the scan
  * (scan.mjs) and easy to verify in isolation (see the manual check in T007).
+ *
+ * Simplified 2026-09-03 from 9 categories down to the ones Deepak said
+ * actually map to how he navigates his own disk: Documents, Downloads,
+ * Desktop, Applications, Developer, plus the functional catch-alls
+ * Reclaimable and Other. See Category's doc comment in scan-types.ts.
  *
  * "reclaimable" is deliberately narrow here: only locations that are
  * unambiguously junk regardless of contents (Trash, caches, build
@@ -18,21 +23,30 @@ import { findOverrideCategory } from "../lib/category-overrides.mjs";
  * ~/Library/CloudStorage/<Provider>-<account>/<sync-root>/... — meaning a
  * user's real Documents/Developer/etc. content can physically live inside
  * ~/Library. Without unwrapping this, everything synced through Drive
- * would be miscategorized as "system-data". We detect the CloudStorage
- * mount, skip past the provider + sync-root segments (e.g.
+ * would be miscategorized as "other". We detect the CloudStorage mount,
+ * skip past the provider + sync-root segments (e.g.
  * "GoogleDrive-me@x.com/My Drive"), and categorize what's inside using
- * the same rules as a normal home directory.
+ * the same rules as a normal home directory. (A dedicated "Google Drive"
+ * category — treating the whole sync root as its own bucket rather than
+ * unwrapping it — is explicitly a "later, maybe" per Deepak, not built here.)
  */
 
-const RECLAIMABLE_BASENAMES = new Set(["node_modules", "DerivedData", ".Trash"]);
+// ".cache"/".npm" added 2026-09-03 — Deepak pointed out these are a real,
+// large (24.5GB combined on his disk) chunk of "unused chunk data" that
+// was invisible both as a category (buried in "other") and as a Clean Up
+// tab flag (scanner/reclaim-rules.mjs never looked at them as whole
+// folders, only individual large/duplicate files that happened to be
+// inside). Same treatment as node_modules/DerivedData: purely
+// regenerable download/build caches, safe to recolor as reclaimable and
+// flag wholesale — see reclaim-rules.mjs's matching rule.
+const RECLAIMABLE_BASENAMES = new Set(["node_modules", "DerivedData", ".Trash", ".cache", ".npm"]);
 const CLOUD_SYNC_ROOT_NAMES = new Set(["My Drive", "iCloud Drive"]);
 
 function categorizeBySegments(segments) {
   if (segments[0] === "Documents") return "documents";
+  if (segments[0] === "Downloads") return "downloads";
+  if (segments[0] === "Desktop") return "desktop";
   if (segments[0] === "Applications") return "applications";
-  if (segments[0] === "Pictures") return "photos";
-  if (segments[0] === "Music") return "music";
-  if (segments[0] === "Library" && segments[1] === "Mail") return "mail";
 
   if (
     segments[0] === "Developer" ||
@@ -44,8 +58,9 @@ function categorizeBySegments(segments) {
     return "developer";
   }
 
-  if (segments[0] === "Library") return "system-data";
-
+  // Library (system/app-managed data), Pictures, Music, Mail and
+  // everything else all fold into "other" — simplified 2026-09-03, see
+  // Category's doc comment in scan-types.ts for why.
   return "other";
 }
 

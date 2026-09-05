@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import trash from "trash";
 import { appendIndexEntry, DELETES_DIR } from "../lib/run-index.mjs";
 import { readProtectedPaths, isProtected } from "../lib/protected-paths.mjs";
+import { isSensitive, sensitiveReason } from "../lib/sensitive-paths.mjs";
 
 /**
  * Deletes (moves to Trash) a set of real paths. This is the one place in
@@ -12,7 +13,12 @@ import { readProtectedPaths, isProtected } from "../lib/protected-paths.mjs";
  * exists to make Constitution Principle I (Safety-First Deletion) true in
  * code, not just in the doc:
  *
- *  1. Protected Paths (FR-010a) are checked FIRST, unconditionally, before
+ *  0. The built-in never-suggest registry (lib/sensitive-paths.mjs) is
+ *     checked first of all: SSH/GPG/AWS keys, saved tokens, the Keychain,
+ *     and every app profile directory (where browsers keep logins,
+ *     cookies and passwords). Unlike Protected Paths it ships with the
+ *     tool, is not editable from the UI, and is never empty.
+ *  1. Protected Paths (FR-010a) are checked next, unconditionally, before
  *     anything else — a match here refuses the item the same hard way a
  *     boundary violation does, regardless of confidence/ruleId/AI origin.
  *  2. The $HOME boundary (FR-010) is checked next. In practice this is
@@ -91,6 +97,21 @@ export async function deletePaths(requestedPaths, { homeDir = process.env.HOME, 
 
   for (const rawPath of requestedPaths) {
     const absPath = path.resolve(rawPath);
+
+    // The never-suggest registry is checked BEFORE even Protected Paths:
+    // it is built into the tool, cannot be edited from the UI, and cannot
+    // be empty. Protected Paths depends on the user having thought to add
+    // something; this does not. Added 2026-09-03 — constitution Principle
+    // I amendment. This is the check that makes the guarantee real: flag
+    // generation also skips these, but that layer is one bug away from
+    // failing, and this one is not.
+    if (isSensitive(absPath)) {
+      skipped.push({
+        path: absPath,
+        reason: `never deletable — ${sensitiveReason(absPath) ?? "credentials or app profile data"}`,
+      });
+      continue;
+    }
 
     if (isProtected(absPath, protectedEntries)) {
       skipped.push({ path: absPath, reason: "protected path — never delete" });

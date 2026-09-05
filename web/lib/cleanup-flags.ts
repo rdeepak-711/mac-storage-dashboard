@@ -23,7 +23,17 @@ export function mergeFlagsByPath(flags: CleanupFlag[]): Map<string, MergedFlag> 
     const reasonLine = `${ruleLabel(flag.ruleId)} — ${flag.reason}`;
     if (existing) {
       existing.reasons.push(reasonLine);
-      if (flag.confidence === "caution") existing.confidence = "caution";
+      // Merging keeps the MOST cautious reading of a path that matched
+      // more than one rule: `review` beats `suggested` (never offer for
+      // bulk deletion something one rule wasn't sure about), and the
+      // least recoverable tier wins. Same principle as the old
+      // "keep the worst confidence", applied to the fields that replaced
+      // it on 2026-09-03.
+      if (flag.disposition === "review") existing.disposition = "review";
+      if (flag.recoverability === "irreplaceable") existing.recoverability = "irreplaceable";
+      else if (flag.recoverability === "redownload" && existing.recoverability === "instant") {
+        existing.recoverability = "redownload";
+      }
     } else {
       byPath.set(flag.path, { ...flag, reasons: [reasonLine] });
     }

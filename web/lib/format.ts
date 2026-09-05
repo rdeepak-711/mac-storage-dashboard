@@ -31,6 +31,7 @@ export function ruleLabel(ruleId: string): string {
     "old-downloads-installer": "Old installer in Downloads",
     "stale-large-file": "Stale large file",
     "duplicate-file": "Duplicate file",
+    "regenerable-cache": "Regenerable cache",
   };
   return labels[ruleId] ?? ruleId;
 }
@@ -45,12 +46,10 @@ export function ruleLabel(ruleId: string): string {
 export function categoryIcon(category: string): string {
   const icons: Record<string, string> = {
     documents: "📄",
+    downloads: "⬇️",
+    desktop: "🖥️",
     applications: "📦",
     developer: "⌨️",
-    photos: "🖼️",
-    "system-data": "⚙️",
-    mail: "✉️",
-    music: "🎵",
     reclaimable: "🧹",
     other: "📁",
   };

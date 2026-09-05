@@ -21,6 +21,9 @@ export interface TreemapRect {
   color: string;
   /** Present only on the synthetic "N more items" cell — see groupSmallEntries(). */
   groupedCount?: number;
+  /** The real folded entries this cell represents — lets the UI drill into
+   * "what's actually in here" instead of a dead end. */
+  groupedEntries?: StorageEntry[];
 }
 
 const GROUPED_PATH = "__grouped__";
@@ -110,21 +113,20 @@ interface OklchColor {
  * Base color per category — OKLCH so lightness/chroma stay perceptually
  * consistent across hues. Revised 2026-09-01 after real data showed the
  * problem with the first pass: on Deepak's actual disk, most content
- * falls under "system-data"/"other", and those were near-zero-chroma
- * true greys — technically correct but made the whole treemap look flat
- * and undifferentiated. Both now carry a real, muted hue (cool slate for
- * system-data, warm sand for other) so they read as distinct categories
- * instead of "no color at all", while staying quieter than the named
- * categories per the design brief's restraint principle.
+ * fell under "other", and near-zero-chroma true grey was technically
+ * correct but made the whole treemap look flat and undifferentiated —
+ * it carries a real, muted warm-sand hue instead, so it reads as its
+ * own category instead of "no color at all", while staying quieter
+ * than the named categories per the design brief's restraint principle.
+ * (Categories simplified 2026-09-03 — see Category's doc comment in
+ * scan-types.ts; "other" now also absorbs what used to be "system-data".)
  */
 const CATEGORY_BASE: Record<Category, OklchColor> = {
   documents: { l: 0.64, c: 0.14, h: 25 },
+  downloads: { l: 0.64, c: 0.13, h: 200 },
+  desktop: { l: 0.64, c: 0.13, h: 330 },
   applications: { l: 0.64, c: 0.13, h: 145 },
   developer: { l: 0.64, c: 0.13, h: 250 },
-  photos: { l: 0.64, c: 0.13, h: 330 },
-  "system-data": { l: 0.5, c: 0.055, h: 255 },
-  mail: { l: 0.64, c: 0.12, h: 200 },
-  music: { l: 0.64, c: 0.13, h: 300 },
   reclaimable: { l: 0.64, c: 0.15, h: 60 },
   other: { l: 0.46, c: 0.045, h: 70 },
 };
@@ -166,6 +168,36 @@ export function cellColor(category: Category, path: string): string {
 }
 
 /**
+ * Real, proportional multi-color gradient for the grouped "+N more
+ * items" cell — added 2026-09-02 after Deepak pointed out the cell was
+ * painted a single solid color (whichever category happened to dominate
+ * by bytes), which visually lied about being "mixed." This bands real
+ * category colors by their actual byte share among the folded items, so
+ * a cell that's genuinely 70% other / 20% developer / 10% documents
+ * looks like that mix, not a flat block of one color.
+ */
+function groupedGradient(folded: StorageEntry[]): string {
+  const byCategory = new Map<Category, number>();
+  let total = 0;
+  for (const e of folded) {
+    byCategory.set(e.category, (byCategory.get(e.category) ?? 0) + e.allocatedBytes);
+    total += e.allocatedBytes;
+  }
+  if (total === 0) return categoryColor("other");
+  const sorted = [...byCategory.entries()].sort((a, b) => b[1] - a[1]);
+  let acc = 0;
+  const stops: string[] = [];
+  for (const [cat, bytes] of sorted) {
+    const start = (acc / total) * 100;
+    acc += bytes;
+    const end = (acc / total) * 100;
+    const color = categoryColor(cat);
+    stops.push(`${color} ${start.toFixed(2)}%`, `${color} ${end.toFixed(2)}%`);
+  }
+  return `linear-gradient(135deg, ${stops.join(", ")})`;
+}
+
+/**
  * Lays out `entries` (one DirectoryListing's worth) into a `width` x
  * `height` box using d3's squarified tiling — see the chat explanation
  * for why squarified over the naive slice-and-dice alternative.
@@ -183,15 +215,13 @@ export function layoutTreemap(
   let folded: StorageEntry[] = [];
   if (visible.length === 0) return [];
 
-  // noGroup: skip the fold-small-cells-into-"N more items" loop entirely.
-  // Added 2026-09-01 for app/page.tsx's category-summary treemap — there
-  // are at most 9 fixed categories there, never hundreds of real folders,
-  // so grouping the smallest ones away just hides a real category name
-  // Deepak explicitly wants to always see (e.g. "3 more items, 5.0 MB"
-  // instead of "documents", "photos", "mail"). Every entry still gets a
-  // guaranteed minimum layout area (MIN_UNGROUPED_SHARE) so a genuinely
-  // tiny category doesn't shrink to an unreadable sliver — same mechanism
-  // already used for the grouped cell itself, just applied to everyone.
+  // noGroup: skip the fold-small-cells-into-"N more items" loop entirely,
+  // used by TreemapLevel whenever a level has few enough real entries
+  // (<=12) that grouping would just hide real folder names for no
+  // layout benefit. Every entry still gets a guaranteed minimum layout
+  // area (MIN_UNGROUPED_SHARE) so a genuinely small one doesn't shrink to
+  // an unreadable sliver — same mechanism already used for the grouped
+  // cell itself, just applied to everyone.
   if (options.noGroup) {
     const leaves = runSquarifiedLayout(visible, width, height, MIN_UNGROUPED_SHARE);
     return leaves.map((node) => {
@@ -265,8 +295,9 @@ export function layoutTreemap(
       y: node.y0,
       width: node.x1 - node.x0,
       height: node.y1 - node.y0,
-      color: cellColor(entry.category, entry.path),
+      color: isGrouped ? groupedGradient(folded) : cellColor(entry.category, entry.path),
       groupedCount: isGrouped ? folded.length : undefined,
+      groupedEntries: isGrouped ? folded : undefined,
     };
   });
 }
