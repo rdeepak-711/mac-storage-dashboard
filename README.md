@@ -2,7 +2,7 @@
 
 A local, single-user dashboard that shows where a Mac's disk space is actually going — a real, recursive folder browser (treemap or list) sized by real disk usage, inline cleanup flags on anything the deterministic rules think is safe to remove, and safe, confirmed, real deletion (Trash-only, never permanent).
 
-Built for personal use on Deepak's MacBook, and doubles as a demo artifact for a job application (Lyzr AI, Developer & Automations Specialist).
+Built for personal use on Deepak's MacBook
 
 ## Running it
 
